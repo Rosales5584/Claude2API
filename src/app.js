@@ -170,20 +170,59 @@ function pickTool(tools, choiceType, choiceName, prompt) {
     return tools[0];
   }
   if (choiceType === 'auto') {
-    // Local stub cannot truly "decide like a model", so only trigger tool use
-    // when users provide an explicit tool-intent phrase.
     const explicitToolIntent = /\buse[_ -]?tool\b|请调用工具|调用工具/.test(prompt || '');
-    return explicitToolIntent ? tools[0] : null;
+    if (explicitToolIntent) {
+      return tools[0];
+    }
+    const weatherIntent = /天气|weather|气温|温度/i.test(prompt || '');
+    if (weatherIntent) {
+      return tools.find((tool) => /weather|天气/i.test(`${tool?.name || ''} ${tool?.description || ''}`)) || null;
+    }
+    return null;
   }
   return null;
 }
 
-function buildToolInput(prompt, imageCount) {
+function extractLikelyLocation(prompt) {
+  const text = String(prompt || '');
+  const cityMatch = text.match(/(北京|上海|广州|深圳|杭州|成都|重庆|天津|苏州|武汉|西安|南京|长沙|郑州|青岛|沈阳|大连|厦门|香港|澳门|台北)/);
+  if (cityMatch) {
+    return cityMatch[1];
+  }
+  const genericMatch = text.match(/(?:查(?:询)?(?:一下)?|帮我查(?:一下)?)([^，。,\s]{2,20})(?:今天|天气|气温|温度)/);
+  if (genericMatch) {
+    return genericMatch[1];
+  }
+  return '';
+}
+
+function buildToolInput(prompt, imageCount, tool) {
   const query = (prompt || '').trim() || 'no_query';
+  const properties = tool?.input_schema?.properties || {};
+  if (properties && typeof properties === 'object') {
+    const input = {};
+    if ('location' in properties) {
+      input.location = extractLikelyLocation(query) || query.slice(0, 40);
+    }
+    if ('unit' in properties) {
+      input.unit = /fahrenheit|华氏/.test(query.toLowerCase()) ? 'fahrenheit' : 'celsius';
+    }
+    if (Object.keys(input).length > 0) {
+      return input;
+    }
+  }
   return {
     query: query.slice(0, 300),
     image_count: imageCount
   };
+}
+
+function buildToolText(tool, toolInput) {
+  if (!tool?.name) return '';
+  if (tool.name === 'get_weather' && toolInput?.location) {
+    return `好的，我来帮您查询${toolInput.location}的天气。`;
+  }
+  return '';
 }
 
 function chunkText(text, size = 32) {
@@ -409,26 +448,30 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
   const routedModel = resolveModel(requestedModel);
   const stream = Boolean(req.body?.stream);
   const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
-  const tools = Array.isArray(req.body?.tools) ? req.body.tools.filter((t) => t?.name) : [];
+  const requestTools = Array.isArray(req.body?.tools) ? req.body.tools : [];
+  const tools = requestTools.filter((t) => t?.name);
   const toolChoiceType = req.body?.tool_choice?.type || 'auto';
   const toolChoiceName = req.body?.tool_choice?.name;
   const prompt = getLatestUserPrompt(messages);
   const imageCount = countInputImages(messages);
   const withThinking = thinkingEnabled(req.body, routedModel);
   const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName, prompt);
+  const toolInput = selectedTool ? buildToolInput(prompt, imageCount, selectedTool) : null;
   const toolUse = selectedTool
     ? {
         id: `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
         name: selectedTool.name,
-        input: buildToolInput(prompt, imageCount)
+        input: toolInput
       }
     : null;
+  const toolText = selectedTool ? buildToolText(selectedTool, toolInput) : '';
   const textReply = buildLocalText(prompt, imageCount);
   const thinkingReply = `分析中：本地兼容层已解析请求，模型路由为 ${routedModel}。`;
-  const inputTokens = estimateRequestTokens(messages, tools, req.body?.thinking || null);
-  const outputTokens = estimateTokens(
-    toolUse ? JSON.stringify(toolUse.input) : `${withThinking ? thinkingReply : ''}${textReply}`
-  );
+  const inputTokens = estimateRequestTokens(messages, requestTools, req.body?.thinking || null);
+  const outputText = toolUse
+    ? `${withThinking ? thinkingReply : ''}${toolText}${JSON.stringify(toolUse.input)}`
+    : `${withThinking ? thinkingReply : ''}${textReply}`;
+  const outputTokens = estimateTokens(outputText);
   const stopReason = toolUse ? 'tool_use' : 'end_turn';
   const upstreamUrl = getUpstreamUrl();
   let account = null;
@@ -507,6 +550,12 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
     });
   }
   if (toolUse) {
+    if (toolText) {
+      content.push({
+        type: 'text',
+        text: toolText
+      });
+    }
     content.push({
       type: 'tool_use',
       id: toolUse.id,
@@ -593,6 +642,31 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
   }
 
   if (toolUse) {
+    if (toolText) {
+      writeSse(res, 'content_block_start', {
+        type: 'content_block_start',
+        index: blockIndex,
+        content_block: {
+          type: 'text',
+          text: ''
+        }
+      });
+      for (const chunk of chunkText(toolText)) {
+        writeSse(res, 'content_block_delta', {
+          type: 'content_block_delta',
+          index: blockIndex,
+          delta: {
+            type: 'text_delta',
+            text: chunk
+          }
+        });
+      }
+      writeSse(res, 'content_block_stop', {
+        type: 'content_block_stop',
+        index: blockIndex
+      });
+      blockIndex += 1;
+    }
     writeSse(res, 'content_block_start', {
       type: 'content_block_start',
       index: blockIndex,

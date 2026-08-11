@@ -8,6 +8,7 @@ const http = require('node:http');
 const ENV_KEYS = [
   'SESSION_SECRET',
   'CLAUDE_API_KEY',
+  'CLAUDE_SESSION_KEYS',
   'UPSTREAM_MESSAGES_URL',
   'UPSTREAM_API_KEY',
   'UPSTREAM_AUTH_HEADER',
@@ -43,12 +44,29 @@ async function listen(server) {
 }
 
 async function close(server) {
+  if (typeof server.closeAllConnections === 'function') {
+    server.closeAllConnections();
+  }
   await new Promise((resolve, reject) => {
     server.close((error) => {
       if (error) reject(error);
       else resolve();
     });
   });
+}
+
+async function waitFor(assertion, timeoutMs = 1000) {
+  const started = Date.now();
+  for (;;) {
+    try {
+      return assertion();
+    } catch (error) {
+      if (Date.now() - started >= timeoutMs) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
 }
 
 test.after(() => {
@@ -86,6 +104,18 @@ test('proxies non-stream requests to configured upstream backend', async () => {
   const upstreamPort = await listen(upstream);
 
   const storeFile = createTempStoreFile();
+  const tools = [{
+    name: 'get_weather',
+    description: '获取指定城市或地区的实时天气预报',
+    input_schema: {
+      type: 'object',
+      properties: {
+        location: { type: 'string' },
+        unit: { type: 'string', enum: ['celsius', 'fahrenheit'] }
+      },
+      required: ['location']
+    }
+  }];
   resetEnv({
     SESSION_SECRET: 'test-secret',
     CLAUDE_API_KEY: 'local-key',
@@ -110,6 +140,7 @@ test('proxies non-stream requests to configured upstream backend', async () => {
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: 100,
+        tools,
         messages: [{ role: 'user', content: '你好' }]
       })
     });
@@ -119,10 +150,13 @@ test('proxies non-stream requests to configured upstream backend', async () => {
     assert.equal(payload.content[0].text, 'real backend ok');
     assert.equal(captured.headers['x-api-key'], 'upstream-key');
     assert.equal(captured.body.model, 'claude-sonnet-5');
+    assert.deepEqual(captured.body.tools, tools);
 
-    const store = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
-    assert.equal(store.usageEvents.length, 1);
-    assert.equal(store.usageEvents[0].success, true);
+    await waitFor(() => {
+      const store = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+      assert.equal(store.usageEvents.length, 1);
+      assert.equal(store.usageEvents[0].success, true);
+    });
   } finally {
     await close(appServer);
     await close(upstream);
@@ -181,5 +215,63 @@ test('passes through streaming responses and can forward bearer auth upstream', 
   } finally {
     await close(appServer);
     await close(upstream);
+  }
+});
+
+test('returns Claude-style local tool_use response when weather tool is provided', async () => {
+  resetEnv({
+    SESSION_SECRET: 'test-secret',
+    CLAUDE_API_KEY: 'local-key',
+    CLAUDE_SESSION_KEYS: 'sk-ant-sid01-test',
+    STORE_FILE: createTempStoreFile()
+  });
+
+  const { startServer } = loadApp();
+  const appServer = startServer(0);
+  await new Promise((resolve) => appServer.once('listening', resolve));
+  const appPort = appServer.address().port;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${appPort}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'local-key'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 1024,
+        tools: [{
+          name: 'get_weather',
+          description: '获取指定城市或地区的实时天气预报',
+          input_schema: {
+            type: 'object',
+            properties: {
+              location: { type: 'string' },
+              unit: { type: 'string', enum: ['celsius', 'fahrenheit'] }
+            },
+            required: ['location']
+          }
+        }],
+        messages: [{
+          role: 'user',
+          content: '帮我查一下北京今天的天气，用摄氏度。'
+        }]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.stop_reason, 'tool_use');
+    assert.equal(payload.content[0].type, 'text');
+    assert.equal(payload.content[0].text, '好的，我来帮您查询北京的天气。');
+    assert.equal(payload.content[1].type, 'tool_use');
+    assert.equal(payload.content[1].name, 'get_weather');
+    assert.deepEqual(payload.content[1].input, {
+      location: '北京',
+      unit: 'celsius'
+    });
+  } finally {
+    await close(appServer);
   }
 });
