@@ -218,11 +218,10 @@ test('passes through streaming responses and can forward bearer auth upstream', 
   }
 });
 
-test('returns Claude-style local tool_use response when weather tool is provided', async () => {
+test('returns 503 when upstream is not configured', async () => {
   resetEnv({
     SESSION_SECRET: 'test-secret',
     CLAUDE_API_KEY: 'local-key',
-    CLAUDE_SESSION_KEYS: 'sk-ant-sid01-test',
     STORE_FILE: createTempStoreFile()
   });
 
@@ -241,37 +240,77 @@ test('returns Claude-style local tool_use response when weather tool is provided
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: 1024,
-        tools: [{
-          name: 'get_weather',
-          description: '获取指定城市或地区的实时天气预报',
-          input_schema: {
-            type: 'object',
-            properties: {
-              location: { type: 'string' },
-              unit: { type: 'string', enum: ['celsius', 'fahrenheit'] }
-            },
-            required: ['location']
-          }
-        }],
         messages: [{
           role: 'user',
-          content: '帮我查一下北京今天的天气，用摄氏度。'
+          content: '你好'
         }]
       })
     });
 
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 503);
     const payload = await response.json();
-    assert.equal(payload.stop_reason, 'tool_use');
-    assert.equal(payload.content[0].type, 'text');
-    assert.equal(payload.content[0].text, '好的，我来帮您查询北京的天气。');
-    assert.equal(payload.content[1].type, 'tool_use');
-    assert.equal(payload.content[1].name, 'get_weather');
-    assert.deepEqual(payload.content[1].input, {
-      location: '北京',
-      unit: 'celsius'
+    assert.deepEqual(payload, {
+      error: 'upstream_not_configured',
+      message: 'UPSTREAM_MESSAGES_URL is required for /v1/messages'
     });
   } finally {
     await close(appServer);
+  }
+});
+
+test('passes through upstream error status and json body', async () => {
+  const upstream = http.createServer((req, res) => {
+    res.statusCode = 403;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'permission_error',
+        message: 'forbidden by upstream'
+      }
+    }));
+  });
+  const upstreamPort = await listen(upstream);
+
+  resetEnv({
+    SESSION_SECRET: 'test-secret',
+    CLAUDE_API_KEY: 'local-key',
+    UPSTREAM_MESSAGES_URL: `http://127.0.0.1:${upstreamPort}/v1/messages`,
+    STORE_FILE: createTempStoreFile()
+  });
+
+  const { startServer } = loadApp();
+  const appServer = startServer(0);
+  await new Promise((resolve) => appServer.once('listening', resolve));
+  const appPort = appServer.address().port;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${appPort}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'local-key'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 100,
+        tools: [{ name: 'tool_a', input_schema: { type: 'object' } }],
+        messages: [{ role: 'user', content: '你好' }]
+      })
+    });
+
+    assert.equal(response.status, 403);
+    assert.match(response.headers.get('content-type') || '', /application\/json/);
+    const payload = await response.json();
+    assert.deepEqual(payload, {
+      type: 'error',
+      error: {
+        type: 'permission_error',
+        message: 'forbidden by upstream'
+      }
+    });
+  } finally {
+    await close(appServer);
+    await close(upstream);
   }
 });

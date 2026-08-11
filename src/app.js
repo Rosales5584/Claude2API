@@ -353,32 +353,39 @@ function copyUpstreamHeaders(upstream, res, stream) {
   }
 }
 
-async function proxyToUpstream(req, res, routedModel, stream) {
+async function proxyToUpstream(req, res, stream) {
   const upstreamUrl = getUpstreamUrl();
   const controller = new AbortController();
+  const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS || 120000);
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
   req.on('aborted', () => controller.abort());
 
-  const upstreamResponse = await fetch(upstreamUrl, {
-    method: 'POST',
-    headers: buildUpstreamHeaders(req, stream),
-    body: JSON.stringify({
-      ...req.body,
-      model: routedModel
-    }),
-    signal: controller.signal
-  });
+  try {
+    const upstreamResponse = await fetch(upstreamUrl, {
+      method: 'POST',
+      headers: buildUpstreamHeaders(req, stream),
+      body: JSON.stringify(req.body),
+      signal: controller.signal
+    });
 
-  res.status(upstreamResponse.status);
-  copyUpstreamHeaders(upstreamResponse, res, stream);
+    res.status(upstreamResponse.status);
+    copyUpstreamHeaders(upstreamResponse, res, stream);
 
-  if (!upstreamResponse.body) {
+    if (!upstreamResponse.body) {
+      return res.end();
+    }
+
+    for await (const chunk of upstreamResponse.body) {
+      res.write(chunk);
+    }
     return res.end();
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
-
-  for await (const chunk of upstreamResponse.body) {
-    res.write(chunk);
-  }
-  return res.end();
 }
 
 function computeAccountStats(store) {
@@ -444,288 +451,59 @@ app.get('/health', async (req, res) => {
 });
 
 app.post('/v1/messages', apiKeyRequired, async (req, res) => {
-  const requestedModel = req.body?.model;
-  const routedModel = resolveModel(requestedModel);
+  const requestedModel = typeof req.body?.model === 'string' ? req.body.model : null;
   const stream = Boolean(req.body?.stream);
   const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
   const requestTools = Array.isArray(req.body?.tools) ? req.body.tools : [];
-  const tools = requestTools.filter((t) => t?.name);
-  const toolChoiceType = req.body?.tool_choice?.type || 'auto';
-  const toolChoiceName = req.body?.tool_choice?.name;
-  const prompt = getLatestUserPrompt(messages);
   const imageCount = countInputImages(messages);
-  const withThinking = thinkingEnabled(req.body, routedModel);
-  const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName, prompt);
-  const toolInput = selectedTool ? buildToolInput(prompt, imageCount, selectedTool) : null;
-  const toolUse = selectedTool
-    ? {
-        id: `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
-        name: selectedTool.name,
-        input: toolInput
-      }
-    : null;
-  const toolText = selectedTool ? buildToolText(selectedTool, toolInput) : '';
-  const textReply = buildLocalText(prompt, imageCount);
-  const thinkingReply = `分析中：本地兼容层已解析请求，模型路由为 ${routedModel}。`;
-  const inputTokens = estimateRequestTokens(messages, requestTools, req.body?.thinking || null);
-  const outputText = toolUse
-    ? `${withThinking ? thinkingReply : ''}${toolText}${JSON.stringify(toolUse.input)}`
-    : `${withThinking ? thinkingReply : ''}${textReply}`;
-  const outputTokens = estimateTokens(outputText);
-  const stopReason = toolUse ? 'tool_use' : 'end_turn';
+  const withThinking = thinkingEnabled(req.body, requestedModel || '');
   const upstreamUrl = getUpstreamUrl();
-  let account = null;
   let success = false;
 
   if (!upstreamUrl) {
-    await withStoreLock(async (store) => {
-      account = pickAccount(store);
+    return res.status(503).json({
+      error: 'upstream_not_configured',
+      message: 'UPSTREAM_MESSAGES_URL is required for /v1/messages'
     });
-  } else {
-    const store = await readStore();
-    account = pickAccount(store);
   }
 
-  if (!account && !upstreamUrl) {
-    return res.status(503).json({ error: 'no_active_account' });
-  }
-
-  if (upstreamUrl) {
-    try {
-      await proxyToUpstream(req, res, routedModel, stream);
-      success = res.statusCode >= 200 && res.statusCode < 400;
+  try {
+    await proxyToUpstream(req, res, stream);
+    success = res.statusCode >= 200 && res.statusCode < 400;
+    return;
+  } catch (error) {
+    success = false;
+    if (error?.name === 'AbortError') {
+      if (!res.headersSent) {
+        return res.status(504).json({
+          error: 'upstream_request_timeout',
+          message: 'upstream request timed out'
+        });
+      }
       return;
-    } catch (error) {
-      success = false;
-      if (error?.name === 'AbortError') {
-        return;
-      }
-      return res.status(502).json({
-        error: 'upstream_request_failed',
-        message: error instanceof Error ? error.message : 'unknown_error'
-      });
-    } finally {
-      await withStoreLock(async (store) => {
-        store.usageEvents.push({
-          accountId: account?.id || null,
-          requestedModel: requestedModel || null,
-          routedModel,
-          stream,
-          hasTools: tools.length > 0,
-          usedTool: Boolean(toolUse),
-          hasImages: imageCount > 0,
-          hasThinking: withThinking,
-          timestamp: new Date().toISOString(),
-          success
-        });
-        const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-        store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
-      });
     }
-  }
-
-  await withStoreLock(async (store) => {
-    store.usageEvents.push({
-      accountId: account.id,
-      requestedModel: requestedModel || null,
-      routedModel,
-      stream,
-      hasTools: tools.length > 0,
-      usedTool: Boolean(toolUse),
-      hasImages: imageCount > 0,
-      hasThinking: withThinking,
-      timestamp: new Date().toISOString(),
-      success: true
+    return res.status(502).json({
+      error: 'upstream_request_failed',
+      message: error instanceof Error ? error.message : 'unknown_error'
     });
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
-  });
-
-  const messageId = `msg_${crypto.randomUUID()}`;
-  const content = [];
-  if (withThinking) {
-    content.push({
-      type: 'thinking',
-      thinking: thinkingReply
+  } finally {
+    await withStoreLock(async (store) => {
+      store.usageEvents.push({
+        accountId: null,
+        requestedModel,
+        routedModel: requestedModel,
+        stream,
+        hasTools: requestTools.length > 0,
+        usedTool: false,
+        hasImages: imageCount > 0,
+        hasThinking: withThinking,
+        timestamp: new Date().toISOString(),
+        success
+      });
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
     });
   }
-  if (toolUse) {
-    if (toolText) {
-      content.push({
-        type: 'text',
-        text: toolText
-      });
-    }
-    content.push({
-      type: 'tool_use',
-      id: toolUse.id,
-      name: toolUse.name,
-      input: toolUse.input
-    });
-  } else {
-    content.push({
-      type: 'text',
-      text: textReply
-    });
-  }
-
-  if (!stream) {
-    return res.json({
-      id: messageId,
-      type: 'message',
-      role: 'assistant',
-      model: routedModel,
-      content,
-      stop_reason: stopReason,
-      usage: {
-        input_tokens: inputTokens,
-        output_tokens: outputTokens
-      },
-      meta: {
-        requested_model: requestedModel || null,
-        routed_model: routedModel,
-        account_id: account.id
-      }
-    });
-  }
-
-  res.status(200);
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  if (typeof res.flushHeaders === 'function') {
-    res.flushHeaders();
-  }
-
-  writeSse(res, 'message_start', {
-    type: 'message_start',
-    message: {
-      id: messageId,
-      type: 'message',
-      role: 'assistant',
-      model: routedModel,
-      content: [],
-      stop_reason: null,
-      stop_sequence: null,
-      usage: {
-        input_tokens: inputTokens,
-        output_tokens: 0
-      }
-    }
-  });
-
-  let blockIndex = 0;
-  if (withThinking) {
-    writeSse(res, 'content_block_start', {
-      type: 'content_block_start',
-      index: blockIndex,
-      content_block: {
-        type: 'thinking',
-        thinking: ''
-      }
-    });
-    for (const chunk of chunkText(thinkingReply)) {
-      writeSse(res, 'content_block_delta', {
-        type: 'content_block_delta',
-        index: blockIndex,
-        delta: {
-          type: 'thinking_delta',
-          thinking: chunk
-        }
-      });
-    }
-    writeSse(res, 'content_block_stop', {
-      type: 'content_block_stop',
-      index: blockIndex
-    });
-    blockIndex += 1;
-  }
-
-  if (toolUse) {
-    if (toolText) {
-      writeSse(res, 'content_block_start', {
-        type: 'content_block_start',
-        index: blockIndex,
-        content_block: {
-          type: 'text',
-          text: ''
-        }
-      });
-      for (const chunk of chunkText(toolText)) {
-        writeSse(res, 'content_block_delta', {
-          type: 'content_block_delta',
-          index: blockIndex,
-          delta: {
-            type: 'text_delta',
-            text: chunk
-          }
-        });
-      }
-      writeSse(res, 'content_block_stop', {
-        type: 'content_block_stop',
-        index: blockIndex
-      });
-      blockIndex += 1;
-    }
-    writeSse(res, 'content_block_start', {
-      type: 'content_block_start',
-      index: blockIndex,
-      content_block: {
-        type: 'tool_use',
-        id: toolUse.id,
-        name: toolUse.name,
-        input: {}
-      }
-    });
-    writeSse(res, 'content_block_delta', {
-      type: 'content_block_delta',
-      index: blockIndex,
-      delta: {
-        type: 'input_json_delta',
-        partial_json: JSON.stringify(toolUse.input)
-      }
-    });
-    writeSse(res, 'content_block_stop', {
-      type: 'content_block_stop',
-      index: blockIndex
-    });
-  } else {
-    writeSse(res, 'content_block_start', {
-      type: 'content_block_start',
-      index: blockIndex,
-      content_block: {
-        type: 'text',
-        text: ''
-      }
-    });
-    for (const chunk of chunkText(textReply)) {
-      writeSse(res, 'content_block_delta', {
-        type: 'content_block_delta',
-        index: blockIndex,
-        delta: {
-          type: 'text_delta',
-          text: chunk
-        }
-      });
-    }
-    writeSse(res, 'content_block_stop', {
-      type: 'content_block_stop',
-      index: blockIndex
-    });
-  }
-
-  writeSse(res, 'message_delta', {
-    type: 'message_delta',
-    delta: {
-      stop_reason: stopReason,
-      stop_sequence: null
-    },
-    usage: {
-      output_tokens: outputTokens
-    }
-  });
-  writeSse(res, 'message_stop', { type: 'message_stop' });
-  return res.end();
 });
 
 app.post('/api/admin/login', async (req, res) => {
