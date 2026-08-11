@@ -83,6 +83,10 @@ CLAUDE_SESSION_KEYS=sk-ant-sid01-xxx,sk-ant-sid01-yyy
 | `MAX_RETRIES` | `3` | 账号切换重试次数 |
 | `COOLDOWN_MINUTES` | `5` | 触发 429 后冷却时间（分钟）|
 | `CLAUDE_API_KEY` | — | 保护 `/v1/messages` 的 API Key（可选）|
+| `UPSTREAM_MESSAGES_URL` | — | 真实上游 Messages 接口地址；设置后 `/v1/messages` 将转发到该后端 |
+| `UPSTREAM_API_KEY` | — | 调用上游时使用的 API Key（留空则透传请求里的认证头）|
+| `UPSTREAM_AUTH_HEADER` | `x-api-key` | 调用上游时使用的认证头名，如 `x-api-key` 或 `authorization` |
+| `UPSTREAM_ANTHROPIC_VERSION` | — | 调用 Anthropic 官方接口时附带的 `anthropic-version` |
 
 ---
 
@@ -143,6 +147,23 @@ curl http://localhost:8080/v1/messages \
 ```
 
 未设置 `CLAUDE_API_KEY` 时，`Authorization` 头可省略。
+设置了 `CLAUDE_API_KEY` 时，同时支持：
+
+- `Authorization: ******
+- `x-api-key: <key>`
+
+### 接到真实后端
+
+如果你希望当前服务像原版那样返回真实模型结果，而不是本地兼容层示例响应，需要配置上游：
+
+```env
+UPSTREAM_MESSAGES_URL=https://api.anthropic.com/v1/messages
+UPSTREAM_API_KEY=sk-ant-api03-xxx
+UPSTREAM_AUTH_HEADER=x-api-key
+UPSTREAM_ANTHROPIC_VERSION=2023-06-01
+```
+
+配置后，`/v1/messages` 会把请求原样转发到真实后端，并保留流式响应。
 
 ### `/v1/messages` 兼容能力
 

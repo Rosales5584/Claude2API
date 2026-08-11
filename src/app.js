@@ -246,11 +246,100 @@ function apiKeyRequired(req, res, next) {
   }
 
   const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const bearerToken = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const headerToken = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
+  const token = bearerToken || headerToken;
   if (!timingSafeStringEqual(token, apiKey)) {
     return res.status(401).json({ error: 'invalid_api_key' });
   }
   return next();
+}
+
+function getUpstreamUrl() {
+  const raw = process.env.UPSTREAM_MESSAGES_URL || '';
+  return raw.trim();
+}
+
+function buildUpstreamHeaders(req, stream) {
+  const headers = {
+    'content-type': 'application/json',
+    accept: stream ? 'text/event-stream' : 'application/json'
+  };
+  const configuredAuthHeader = (process.env.UPSTREAM_AUTH_HEADER || 'x-api-key').trim().toLowerCase();
+  const configuredApiKey = (process.env.UPSTREAM_API_KEY || '').trim();
+  const auth = req.headers.authorization || '';
+  const inboundBearerToken = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const inboundApiKey = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
+  const inboundToken = inboundBearerToken || inboundApiKey;
+
+  if (configuredApiKey) {
+    headers[configuredAuthHeader] = configuredAuthHeader === 'authorization'
+      ? 'Bearer ' + configuredApiKey
+      : configuredApiKey;
+  } else if (inboundToken) {
+    headers[configuredAuthHeader] = configuredAuthHeader === 'authorization'
+      ? 'Bearer ' + inboundToken
+      : inboundToken;
+  }
+
+  const configuredVersion = (process.env.UPSTREAM_ANTHROPIC_VERSION || '').trim();
+  const requestVersion = typeof req.headers['anthropic-version'] === 'string'
+    ? req.headers['anthropic-version'].trim()
+    : '';
+  if (configuredVersion) {
+    headers['anthropic-version'] = configuredVersion;
+  } else if (requestVersion) {
+    headers['anthropic-version'] = requestVersion;
+  }
+
+  const requestBeta = typeof req.headers['anthropic-beta'] === 'string'
+    ? req.headers['anthropic-beta'].trim()
+    : '';
+  if (requestBeta) {
+    headers['anthropic-beta'] = requestBeta;
+  }
+
+  return headers;
+}
+
+function copyUpstreamHeaders(upstream, res, stream) {
+  const headerNames = stream
+    ? ['content-type', 'cache-control', 'connection', 'x-request-id']
+    : ['content-type', 'x-request-id'];
+  for (const name of headerNames) {
+    const value = upstream.headers.get(name);
+    if (value) {
+      res.setHeader(name, value);
+    }
+  }
+}
+
+async function proxyToUpstream(req, res, routedModel, stream) {
+  const upstreamUrl = getUpstreamUrl();
+  const controller = new AbortController();
+  req.on('aborted', () => controller.abort());
+
+  const upstreamResponse = await fetch(upstreamUrl, {
+    method: 'POST',
+    headers: buildUpstreamHeaders(req, stream),
+    body: JSON.stringify({
+      ...req.body,
+      model: routedModel
+    }),
+    signal: controller.signal
+  });
+
+  res.status(upstreamResponse.status);
+  copyUpstreamHeaders(upstreamResponse, res, stream);
+
+  if (!upstreamResponse.body) {
+    return res.end();
+  }
+
+  for await (const chunk of upstreamResponse.body) {
+    res.write(chunk);
+  }
+  return res.end();
 }
 
 function computeAccountStats(store) {
@@ -341,12 +430,58 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
     toolUse ? JSON.stringify(toolUse.input) : `${withThinking ? thinkingReply : ''}${textReply}`
   );
   const stopReason = toolUse ? 'tool_use' : 'end_turn';
+  const upstreamUrl = getUpstreamUrl();
   let account = null;
+  let success = false;
+
+  if (!upstreamUrl) {
+    await withStoreLock(async (store) => {
+      account = pickAccount(store);
+    });
+  } else {
+    const store = await readStore();
+    account = pickAccount(store);
+  }
+
+  if (!account && !upstreamUrl) {
+    return res.status(503).json({ error: 'no_active_account' });
+  }
+
+  if (upstreamUrl) {
+    try {
+      await proxyToUpstream(req, res, routedModel, stream);
+      success = res.statusCode >= 200 && res.statusCode < 400;
+      return;
+    } catch (error) {
+      success = false;
+      if (error?.name === 'AbortError') {
+        return;
+      }
+      return res.status(502).json({
+        error: 'upstream_request_failed',
+        message: error instanceof Error ? error.message : 'unknown_error'
+      });
+    } finally {
+      await withStoreLock(async (store) => {
+        store.usageEvents.push({
+          accountId: account?.id || null,
+          requestedModel: requestedModel || null,
+          routedModel,
+          stream,
+          hasTools: tools.length > 0,
+          usedTool: Boolean(toolUse),
+          hasImages: imageCount > 0,
+          hasThinking: withThinking,
+          timestamp: new Date().toISOString(),
+          success
+        });
+        const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
+      });
+    }
+  }
 
   await withStoreLock(async (store) => {
-    account = pickAccount(store);
-    if (!account) return;
-
     store.usageEvents.push({
       accountId: account.id,
       requestedModel: requestedModel || null,
@@ -362,10 +497,6 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
     const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
     store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
   });
-
-  if (!account) {
-    return res.status(503).json({ error: 'no_active_account' });
-  }
 
   const messageId = `msg_${crypto.randomUUID()}`;
   const content = [];
@@ -736,7 +867,18 @@ app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 app.get('/', (req, res) => res.redirect('/admin'));
 
 const port = Number(process.env.PORT || 8080);
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`claude2api local app listening on :${port}`);
-});
+function startServer(listenPort = port) {
+  return app.listen(listenPort, () => {
+    // eslint-disable-next-line no-console
+    console.log(`claude2api local app listening on :${listenPort}`);
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  app,
+  startServer
+};
