@@ -1,8 +1,9 @@
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const path = require('path');
-const { readStore, writeStore } = require('./store');
+const { readStore, withStoreLock } = require('./store');
 
 const app = express();
 
@@ -56,6 +57,22 @@ function authRequired(req, res, next) {
   return next();
 }
 
+function ensureCsrfToken(req) {
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = crypto.randomUUID();
+  }
+  return req.session.csrfToken;
+}
+
+function csrfRequired(req, res, next) {
+  const sent = req.headers['x-csrf-token'];
+  const expected = req.session?.csrfToken;
+  if (!sent || !expected || sent !== expected) {
+    return res.status(403).json({ error: 'csrf_invalid' });
+  }
+  return next();
+}
+
 function apiKeyRequired(req, res, next) {
   const apiKey = process.env.CLAUDE_API_KEY;
   if (!apiKey) {
@@ -84,7 +101,7 @@ function computeAccountStats(store) {
     const sevenCount = seven.length;
     const limit = Number(account.dailyLimit || 0);
 
-    const sessionUsageRate = limit > 0 ? Number(((todayCount / limit) * 100).toFixed(2)) : null;
+    const dailyUsageRate = limit > 0 ? Number(((todayCount / limit) * 100).toFixed(2)) : null;
     const sevenDayUsageRate = limit > 0
       ? Number(((sevenCount / (limit * 7)) * 100).toFixed(2))
       : null;
@@ -97,7 +114,7 @@ function computeAccountStats(store) {
       todaySessions: todayCount,
       sevenDaySessions: sevenCount,
       totalSessions: all.length,
-      sessionUsageRate,
+      dailyUsageRate,
       sevenDayUsageRate
     };
   });
@@ -105,42 +122,55 @@ function computeAccountStats(store) {
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false }));
+if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET is required in production');
+}
+if (!process.env.CLAUDE_API_KEY) {
+  // eslint-disable-next-line no-console
+  console.warn('CLAUDE_API_KEY is not set; /v1/messages is unauthenticated.');
+}
 app.use(session({
   secret: process.env.SESSION_SECRET || 'local-dev-secret-change-me',
   resave: false,
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
-    sameSite: 'lax'
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production'
   }
 }));
 
-app.get('/health', (req, res) => {
-  const store = readStore();
+app.get('/health', async (req, res) => {
+  const store = await readStore();
   res.json({ status: 'ok', accounts: store.accounts.length });
 });
 
-app.post('/v1/messages', apiKeyRequired, (req, res) => {
-  const store = readStore();
-  const account = pickAccount(store);
+app.post('/v1/messages', apiKeyRequired, async (req, res) => {
+  const requestedModel = req.body?.model;
+  const routedModel = resolveModel(requestedModel);
+  let account = null;
+
+  await withStoreLock(async (store) => {
+    account = pickAccount(store);
+    if (!account) return;
+
+    store.usageEvents.push({
+      accountId: account.id,
+      requestedModel: requestedModel || null,
+      routedModel,
+      timestamp: new Date().toISOString(),
+      success: true
+    });
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
+  });
+
   if (!account) {
     return res.status(503).json({ error: 'no_active_account' });
   }
 
-  const requestedModel = req.body?.model;
-  const routedModel = resolveModel(requestedModel);
-
-  store.usageEvents.push({
-    accountId: account.id,
-    requestedModel: requestedModel || null,
-    routedModel,
-    timestamp: new Date().toISOString(),
-    success: true
-  });
-  writeStore(store);
-
   return res.json({
-    id: `msg_${Date.now()}`,
+    id: `msg_${crypto.randomUUID()}`,
     type: 'message',
     role: 'assistant',
     model: routedModel,
@@ -163,25 +193,28 @@ app.post('/v1/messages', apiKeyRequired, (req, res) => {
   });
 });
 
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const { username, password } = req.body || {};
-  const store = readStore();
+  const store = await readStore();
+  const dummyHash = '$2b$10$8vWj5N5Y6Q4f4VVRx8JYtODQx95Ds2N7N5tbJvMNCc2N6fMCRkgxK';
+  const hash = username === store.adminUser ? store.adminPassHash : dummyHash;
+  const ok = bcrypt.compareSync(password || '', hash);
 
-  if (username !== store.adminUser) {
-    return res.status(401).json({ error: 'invalid_credentials' });
-  }
-
-  const ok = bcrypt.compareSync(password || '', store.adminPassHash);
-  if (!ok) {
+  if (username !== store.adminUser || !ok) {
     return res.status(401).json({ error: 'invalid_credentials' });
   }
 
   req.session.isAdmin = true;
   req.session.adminUser = store.adminUser;
+  ensureCsrfToken(req);
   return res.json({ ok: true, user: store.adminUser });
 });
 
-app.post('/api/admin/logout', authRequired, (req, res) => {
+app.get('/api/admin/csrf', authRequired, (req, res) => {
+  res.json({ token: ensureCsrfToken(req) });
+});
+
+app.post('/api/admin/logout', authRequired, csrfRequired, (req, res) => {
   req.session.destroy(() => {
     res.json({ ok: true });
   });
@@ -191,26 +224,30 @@ app.get('/api/admin/me', authRequired, (req, res) => {
   res.json({ ok: true, user: req.session.adminUser });
 });
 
-app.post('/api/admin/password', authRequired, (req, res) => {
+app.post('/api/admin/password', authRequired, csrfRequired, async (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
 
   if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ error: 'new_password_too_short' });
   }
 
-  const store = readStore();
-  const oldOk = bcrypt.compareSync(oldPassword || '', store.adminPassHash);
-  if (!oldOk) {
+  let updated = false;
+  await withStoreLock(async (lockedStore) => {
+    const oldOk = bcrypt.compareSync(oldPassword || '', lockedStore.adminPassHash);
+    if (!oldOk) {
+      return;
+    }
+    lockedStore.adminPassHash = bcrypt.hashSync(newPassword, 10);
+    updated = true;
+  });
+  if (!updated) {
     return res.status(400).json({ error: 'old_password_invalid' });
   }
-
-  store.adminPassHash = bcrypt.hashSync(newPassword, 10);
-  writeStore(store);
   return res.json({ ok: true });
 });
 
-app.get('/api/stats/accounts', authRequired, (req, res) => {
-  const store = readStore();
+app.get('/api/stats/accounts', authRequired, async (req, res) => {
+  const store = await readStore();
   res.json({ items: computeAccountStats(store) });
 });
 

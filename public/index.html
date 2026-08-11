@@ -60,10 +60,16 @@
     </div>
 
     <script>
+      let csrfToken = null;
+
       async function api(path, method = 'GET', body) {
+        const headers = body ? { 'Content-Type': 'application/json' } : {};
+        if (csrfToken && method !== 'GET') {
+          headers['X-CSRF-Token'] = csrfToken;
+        }
         const resp = await fetch(path, {
           method,
-          headers: body ? { 'Content-Type': 'application/json' } : undefined,
+          headers: Object.keys(headers).length ? headers : undefined,
           body: body ? JSON.stringify(body) : undefined,
           credentials: 'include'
         });
@@ -80,17 +86,18 @@
 
       function renderStats(items) {
         const tbody = document.getElementById('statsBody');
-        tbody.innerHTML = items.map(it => {
-          const usage = it.sessionUsageRate == null ? '不限额' : `${it.sessionUsageRate}%`;
+        tbody.innerHTML = '';
+        items.forEach((it) => {
+          const usage = it.dailyUsageRate == null ? '不限额' : `${it.dailyUsageRate}%`;
           const usage7 = it.sevenDayUsageRate == null ? '不限额' : `${it.sevenDayUsageRate}%`;
-          return `<tr>
-            <td>${it.email}</td>
-            <td>${it.todaySessions}</td>
-            <td>${it.sevenDaySessions}</td>
-            <td>${usage}</td>
-            <td>${usage7}</td>
-          </tr>`;
-        }).join('');
+          const tr = document.createElement('tr');
+          [it.email, it.todaySessions, it.sevenDaySessions, usage, usage7].forEach((val) => {
+            const td = document.createElement('td');
+            td.textContent = String(val);
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
       }
 
       async function loadStats() {
@@ -101,6 +108,8 @@
       async function checkLogin() {
         try {
           await api('/api/admin/me');
+          const csrf = await api('/api/admin/csrf');
+          csrfToken = csrf.token;
           document.getElementById('login').style.display = 'none';
           document.getElementById('dashboard').style.display = 'block';
           await loadStats();

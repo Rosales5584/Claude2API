@@ -4,6 +4,6 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 COPY public ./public
-COPY data ./data
+RUN mkdir -p data
 EXPOSE 8080
 CMD ["npm", "start"]

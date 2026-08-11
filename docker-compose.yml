@@ -10,12 +10,9 @@ services:
     env_file:
       - .env
     environment:
-      - LISTEN_ADDR=:8080
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - PORT=8080
+    volumes:
+      - app_data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 30s
@@ -23,47 +20,5 @@ services:
       retries: 3
       start_period: 15s
 
-  postgres:
-    image: postgres:16-alpine
-    container_name: claude2api-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${DB_USER:-claude2api}
-      POSTGRES_PASSWORD: ${DB_PASS:?DB_PASS is required}
-      POSTGRES_DB: ${DB_NAME:-claude2api}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-claude2api} -d ${DB_NAME:-claude2api}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: claude2api-redis
-    restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASS:-redis_secret}
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASS:-redis_secret}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: claude2api-watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_POLL_INTERVAL=600
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_INCLUDE_STOPPED=false
-    command: claude2api
-
 volumes:
-  postgres_data:
-  redis_data:
+  app_data:

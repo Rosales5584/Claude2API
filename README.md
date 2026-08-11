@@ -2,6 +2,8 @@
 
 Claude.ai Web → Anthropic API 兼容代理。将 Claude.ai 账号会话转换为标准 `/v1/messages` 接口，支持流式输出、工具调用、图片上传、扩展思考等功能。
 
+> 本仓库当前为二开本地实现版本：默认使用本地 JSON 存储（`/app/data/store.json`），不再依赖内置 PostgreSQL/Redis 容器。
+
 ---
 
 ## 快速部署
@@ -49,26 +51,9 @@ CLAUDE_SESSION_KEYS=sk-ant-sid01-xxx,sk-ant-sid01-yyy
 
 多个 Session Key 用逗号分隔，服务启动后自动轮询使用，无需 PostgreSQL。
 
-### 模式二：PostgreSQL 模式（推荐生产）
+### 模式二：本地 JSON 持久化模式（当前版本）
 
-`docker-compose.yml` 已内置 PostgreSQL 和 Redis，**开箱即用，无需额外安装**。
-
-在 `.env` 中配置（`DB_HOST` 固定填 `postgres`，对应 compose 内的服务名）：
-
-```env
-DB_HOST=postgres
-DB_PORT=5432
-DB_USER=claude2api
-DB_PASS=your_strong_password    # 必填，自定义强密码
-DB_NAME=claude2api
-
-REDIS_PASS=your_redis_password  # 必填，需与 REDIS_URL 保持一致
-REDIS_URL=redis://:your_redis_password@redis:6379/0
-```
-
-> 如需连接**外部**数据库，将 `DB_HOST` 改为远程 IP/域名，并在 `docker-compose.yml` 中删除 `postgres` 和 `redis` 服务及对应的 `depends_on`。
-
-通过管理面板动态添加/删除账号，支持每账号独立限额、封禁自动切换等高级功能。
+当前分支默认把运行数据写入 `data/store.json`（容器内路径 `/app/data/store.json`），不依赖 PostgreSQL/Redis。
 
 ---
 
@@ -84,23 +69,16 @@ REDIS_URL=redis://:your_redis_password@redis:6379/0
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `LISTEN_ADDR` | `:8080` | 服务监听地址，格式为 `:端口号` |
+| `PORT` | `8080` | 服务监听端口 |
 | `CLAUDE_SESSION_KEYS` | — | Simple 模式：逗号分隔的 Session Keys |
-| `DB_HOST` | `localhost` | PostgreSQL 主机 IP 或域名 |
-| `DB_PORT` | `5432` | PostgreSQL 端口（默认 5432，远程可能不同）|
-| `DB_USER` | `claude2api` | PostgreSQL 用户名 |
-| `DB_PASS` | — | PostgreSQL 密码 |
-| `DB_NAME` | `claude2api` | PostgreSQL 数据库名 |
-| `DB_SSLMODE` | `disable` | PostgreSQL SSL 模式：`disable`（本地/VPS）\| `require`（Neon/Supabase 等托管数据库）|
-| `DATABASE_URL` | — | 完整 PostgreSQL DSN，优先级高于所有 `DB_*` 变量（推荐 Neon/Supabase 使用）|
 | `PROXY_HOST` | — | 住宅代理主机（留空则直连 claude.ai）|
 | `PROXY_PORT` | `3010` | 代理端口 |
 | `PROXY_USER` | — | 代理认证用户名 |
 | `PROXY_PASS` | — | 代理认证密码 |
 | `PROXY_REGION` | `US` | 代理出口区域（如 `US`、`JP`、`GB`）|
 | `ADMIN_USER` | `admin` | 管理面板用户名 |
-| `ADMIN_PASS` | `admin` | 管理面板密码（**务必修改**）|
-| `REDIS_URL` | — | Redis 连接串，用于持久化 metrics（可选）|
+| `ADMIN_PASS` | `change_me_please` | 管理面板密码（**务必修改**）|
+| `SESSION_SECRET` | — | 管理会话签名密钥（务必修改）|
 | `CLAUDE_DAILY_LIMIT` | `0` | 每账号每日请求上限（`0` = 不限）|
 | `MAX_RETRIES` | `3` | 账号切换重试次数 |
 | `COOLDOWN_MINUTES` | `5` | 触发 429 后冷却时间（分钟）|
@@ -108,81 +86,9 @@ REDIS_URL=redis://:your_redis_password@redis:6379/0
 
 ---
 
-## 数据库连接说明
+## 持久化说明
 
-默认使用 `docker-compose.yml` 内置的 PostgreSQL 容器，`DB_HOST` 固定填服务名 `postgres`，无需额外安装。
-
-```env
-# 默认：使用内置 postgres 容器
-DB_HOST=postgres
-DB_PORT=5432
-DB_USER=claude2api
-DB_PASS=your_strong_password
-DB_NAME=claude2api
-# DB_SSLMODE 默认 disable，本地容器无需修改
-```
-
-### 连接外部 PostgreSQL（VPS / 自建）
-
-将 `DB_HOST` 改为对应 IP 或域名，并删除 `docker-compose.yml` 中的 `postgres` 服务和 `depends_on` 相关配置：
-
-```env
-DB_HOST=db.example.com
-DB_PORT=5432
-DB_USER=claude2api
-DB_PASS=your_strong_password
-DB_NAME=claude2api
-DB_SSLMODE=disable  # 本地网络/VPS 通常不需要 SSL
-```
-
-### 连接托管 PostgreSQL（Neon / Supabase / Railway 等）
-
-这类平台强制要求 TLS 连接。推荐直接使用平台提供的完整连接串（`DATABASE_URL`）：
-
-```env
-# Neon
-DATABASE_URL=postgres://user:pass@ep-xxx-yyy.us-east-2.aws.neon.tech/dbname?sslmode=require
-
-# Supabase
-DATABASE_URL=postgres://postgres:pass@db.xxxxxxxx.supabase.co:5432/postgres?sslmode=require
-```
-
-或者分字段配置（效果相同）：
-
-```env
-DB_HOST=ep-xxx-yyy.us-east-2.aws.neon.tech
-DB_PORT=5432
-DB_USER=your_neon_user
-DB_PASS=your_neon_password
-DB_NAME=your_db_name
-DB_SSLMODE=require   # ← 关键：托管数据库必须设置
-```
-
-> **注意**：使用托管数据库时，需删除 `docker-compose.yml` 中的 `postgres` 服务及 `claude2api` 下的 `depends_on.postgres` 配置。
-
----
-
-## Redis 连接说明
-
-默认使用 `docker-compose.yml` 内置的 Redis 容器。`REDIS_PASS` 和 `REDIS_URL` 中的密码必须保持一致。
-
-```env
-# 默认：使用内置 redis 容器
-REDIS_PASS=your_redis_password
-REDIS_URL=redis://:your_redis_password@redis:6379/0
-```
-
-如需连接外部 Redis，将 `REDIS_URL` 中的主机名改为实际地址，并删除 `docker-compose.yml` 中的 `redis` 服务和 `depends_on` 相关配置：
-
-```env
-# 示例：外部 Redis（带密码，非标准端口）
-REDIS_URL=redis://:your_redis_password@redis.example.com:6388/0
-```
-
-连接串通用格式：
-```
-redis://:密码@主机:端口/库编号
-```
+当前版本仅使用本地 JSON 文件持久化，`docker-compose.yml` 已挂载命名卷 `app_data` 到 `/app/data`，重启容器不会丢失 `store.json` 数据。
 
 ---
 

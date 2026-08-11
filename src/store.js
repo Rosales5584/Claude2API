@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
+let storeQueue = Promise.resolve();
 
 function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -37,16 +38,30 @@ function ensureStore() {
   }
 }
 
-function readStore() {
+async function readStore() {
   ensureStore();
-  return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
+  const content = await fs.promises.readFile(STORE_FILE, 'utf8');
+  return JSON.parse(content);
 }
 
-function writeStore(data) {
-  fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), 'utf8');
+async function writeStore(data) {
+  await fs.promises.writeFile(STORE_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function withStoreLock(handler) {
+  const run = async () => {
+    const store = await readStore();
+    const result = await handler(store);
+    await writeStore(store);
+    return result;
+  };
+  const op = storeQueue.then(run, run);
+  storeQueue = op.catch(() => {});
+  return op;
 }
 
 module.exports = {
   readStore,
-  writeStore
+  writeStore,
+  withStoreLock
 };
