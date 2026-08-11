@@ -40,6 +40,117 @@ function resolveModel(requestModel) {
   return 'claude-sonnet-5';
 }
 
+function normalizeContent(content) {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+  if (Array.isArray(content)) {
+    return content.filter((v) => v && typeof v === 'object');
+  }
+  if (content && typeof content === 'object' && content.type) {
+    return [content];
+  }
+  return [];
+}
+
+function extractTextFromBlock(block) {
+  if (!block || typeof block !== 'object') return '';
+  if (block.type === 'text' && typeof block.text === 'string') {
+    return block.text;
+  }
+  if (block.type === 'tool_result') {
+    if (typeof block.content === 'string') {
+      return block.content;
+    }
+    if (Array.isArray(block.content)) {
+      return block.content
+        .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+        .join('\n');
+    }
+  }
+  return '';
+}
+
+function getLatestUserPrompt(messages) {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg?.role !== 'user') continue;
+    const blocks = normalizeContent(msg.content);
+    const text = blocks.map(extractTextFromBlock).filter(Boolean).join('\n').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function countInputImages(messages) {
+  if (!Array.isArray(messages)) return 0;
+  let total = 0;
+  for (const msg of messages) {
+    const blocks = normalizeContent(msg?.content);
+    for (const block of blocks) {
+      if (block?.type === 'image' || block?.type === 'input_image') {
+        total += 1;
+      }
+    }
+  }
+  return total;
+}
+
+function thinkingEnabled(body, routedModel) {
+  const t = body?.thinking;
+  if (t === true) return true;
+  if (t && typeof t === 'object' && t.type === 'enabled') return true;
+  return typeof routedModel === 'string' && routedModel.endsWith('-thinking');
+}
+
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.max(1, Math.ceil(String(text).length / 4));
+}
+
+function pickTool(tools, choiceType, choiceName, prompt) {
+  if (!tools.length || choiceType === 'none') return null;
+  if (choiceType === 'tool' && choiceName) {
+    return tools.find((t) => t?.name === choiceName) || null;
+  }
+  if (choiceType === 'any') {
+    return tools[0];
+  }
+  const wantsTool = /工具|tool|weather|search|查询|调用/.test(prompt || '');
+  if (wantsTool) {
+    return tools[0];
+  }
+  return null;
+}
+
+function buildToolInput(prompt, imageCount) {
+  const query = (prompt || '').trim() || 'no_query';
+  return {
+    query: query.slice(0, 300),
+    image_count: imageCount
+  };
+}
+
+function chunkText(text, size = 32) {
+  const chunks = [];
+  for (let i = 0; i < text.length; i += size) {
+    chunks.push(text.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function writeSse(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function buildLocalText(prompt, imageCount) {
+  const summary = prompt ? `你说的是：${prompt}` : '已收到消息。';
+  const imageInfo = imageCount > 0 ? `（检测到 ${imageCount} 张图片输入）` : '';
+  return `Local compatibility mode response. ${summary}${imageInfo}`;
+}
+
 function pickAccount(store) {
   const actives = store.accounts.filter((a) => a.status === 'active');
   if (!actives.length) {
@@ -148,6 +259,33 @@ app.get('/health', async (req, res) => {
 app.post('/v1/messages', apiKeyRequired, async (req, res) => {
   const requestedModel = req.body?.model;
   const routedModel = resolveModel(requestedModel);
+  const stream = Boolean(req.body?.stream);
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  const tools = Array.isArray(req.body?.tools) ? req.body.tools.filter((t) => t?.name) : [];
+  const toolChoiceType = req.body?.tool_choice?.type || 'auto';
+  const toolChoiceName = req.body?.tool_choice?.name;
+  const prompt = getLatestUserPrompt(messages);
+  const imageCount = countInputImages(messages);
+  const withThinking = thinkingEnabled(req.body, routedModel);
+  const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName, prompt);
+  const toolUse = selectedTool
+    ? {
+        id: `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
+        name: selectedTool.name,
+        input: buildToolInput(prompt, imageCount)
+      }
+    : null;
+  const textReply = buildLocalText(prompt, imageCount);
+  const thinkingReply = `分析中：本地兼容层已解析请求，模型路由为 ${routedModel}。`;
+  const inputTokens = estimateTokens(JSON.stringify({
+    messages,
+    tools,
+    thinking: req.body?.thinking || null
+  }));
+  const outputTokens = estimateTokens(
+    toolUse ? JSON.stringify(toolUse.input) : `${withThinking ? thinkingReply : ''}${textReply}`
+  );
+  const stopReason = toolUse ? 'tool_use' : 'end_turn';
   let account = null;
 
   await withStoreLock(async (store) => {
@@ -158,6 +296,11 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
       accountId: account.id,
       requestedModel: requestedModel || null,
       routedModel,
+      stream,
+      hasTools: tools.length > 0,
+      usedTool: Boolean(toolUse),
+      hasImages: imageCount > 0,
+      hasThinking: withThinking,
       timestamp: new Date().toISOString(),
       success: true
     });
@@ -169,28 +312,160 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
     return res.status(503).json({ error: 'no_active_account' });
   }
 
-  return res.json({
-    id: `msg_${crypto.randomUUID()}`,
-    type: 'message',
-    role: 'assistant',
-    model: routedModel,
-    content: [
-      {
-        type: 'text',
-        text: 'Local compatibility mode response.'
+  const messageId = `msg_${crypto.randomUUID()}`;
+  const content = [];
+  if (withThinking) {
+    content.push({
+      type: 'thinking',
+      thinking: thinkingReply
+    });
+  }
+  if (toolUse) {
+    content.push({
+      type: 'tool_use',
+      id: toolUse.id,
+      name: toolUse.name,
+      input: toolUse.input
+    });
+  } else {
+    content.push({
+      type: 'text',
+      text: textReply
+    });
+  }
+
+  if (!stream) {
+    return res.json({
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      model: routedModel,
+      content,
+      stop_reason: stopReason,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens
+      },
+      meta: {
+        requested_model: requestedModel || null,
+        routed_model: routedModel,
+        account_id: account.id
       }
-    ],
-    stop_reason: 'end_turn',
-    usage: {
-      input_tokens: 0,
-      output_tokens: 0
-    },
-    meta: {
-      requested_model: requestedModel || null,
-      routed_model: routedModel,
-      account_id: account.id
+    });
+  }
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
+
+  writeSse(res, 'message_start', {
+    type: 'message_start',
+    message: {
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      model: routedModel,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: 0
+      }
     }
   });
+
+  let blockIndex = 0;
+  if (withThinking) {
+    writeSse(res, 'content_block_start', {
+      type: 'content_block_start',
+      index: blockIndex,
+      content_block: {
+        type: 'thinking',
+        thinking: ''
+      }
+    });
+    for (const chunk of chunkText(thinkingReply)) {
+      writeSse(res, 'content_block_delta', {
+        type: 'content_block_delta',
+        index: blockIndex,
+        delta: {
+          type: 'thinking_delta',
+          thinking: chunk
+        }
+      });
+    }
+    writeSse(res, 'content_block_stop', {
+      type: 'content_block_stop',
+      index: blockIndex
+    });
+    blockIndex += 1;
+  }
+
+  if (toolUse) {
+    writeSse(res, 'content_block_start', {
+      type: 'content_block_start',
+      index: blockIndex,
+      content_block: {
+        type: 'tool_use',
+        id: toolUse.id,
+        name: toolUse.name,
+        input: {}
+      }
+    });
+    writeSse(res, 'content_block_delta', {
+      type: 'content_block_delta',
+      index: blockIndex,
+      delta: {
+        type: 'input_json_delta',
+        partial_json: JSON.stringify(toolUse.input)
+      }
+    });
+    writeSse(res, 'content_block_stop', {
+      type: 'content_block_stop',
+      index: blockIndex
+    });
+  } else {
+    writeSse(res, 'content_block_start', {
+      type: 'content_block_start',
+      index: blockIndex,
+      content_block: {
+        type: 'text',
+        text: ''
+      }
+    });
+    for (const chunk of chunkText(textReply)) {
+      writeSse(res, 'content_block_delta', {
+        type: 'content_block_delta',
+        index: blockIndex,
+        delta: {
+          type: 'text_delta',
+          text: chunk
+        }
+      });
+    }
+    writeSse(res, 'content_block_stop', {
+      type: 'content_block_stop',
+      index: blockIndex
+    });
+  }
+
+  writeSse(res, 'message_delta', {
+    type: 'message_delta',
+    delta: {
+      stop_reason: stopReason,
+      stop_sequence: null
+    },
+    usage: {
+      output_tokens: outputTokens
+    }
+  });
+  writeSse(res, 'message_stop', { type: 'message_stop' });
+  return res.end();
 });
 
 app.post('/api/admin/login', async (req, res) => {
