@@ -543,7 +543,7 @@ app.get('/api/admin/csrf', authRequired, (req, res) => {
   res.json({ token: ensureCsrfToken(req) });
 });
 
-app.post('/api/admin/logout', authRequired, csrfRequired, (req, res) => {
+app.post('/api/admin/logout', authRequired, (req, res) => {
   req.session.destroy(() => {
     res.json({ ok: true });
   });
@@ -554,30 +554,182 @@ app.get('/api/admin/me', authRequired, (req, res) => {
 });
 
 app.post('/api/admin/password', authRequired, csrfRequired, async (req, res) => {
-  const { oldPassword, newPassword } = req.body || {};
+  const { newPassword } = req.body || {};
 
   if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ error: 'new_password_too_short' });
   }
 
-  let updated = false;
   await withStoreLock(async (lockedStore) => {
-    const oldOk = bcrypt.compareSync(oldPassword || '', lockedStore.adminPassHash);
-    if (!oldOk) {
-      return;
-    }
     lockedStore.adminPassHash = bcrypt.hashSync(newPassword, 10);
-    updated = true;
   });
-  if (!updated) {
-    return res.status(400).json({ error: 'old_password_invalid' });
-  }
   return res.json({ ok: true });
 });
 
 app.get('/api/stats/accounts', authRequired, async (req, res) => {
   const store = await readStore();
   res.json({ items: computeAccountStats(store) });
+});
+
+// Account management
+app.get('/api/admin/accounts', authRequired, async (req, res) => {
+  const store = await readStore();
+  const items = store.accounts.map((a) => ({
+    id: a.id,
+    email: a.email,
+    status: a.status,
+    dailyLimit: a.dailyLimit || 0
+  }));
+  res.json({ items });
+});
+
+app.post('/api/admin/accounts', authRequired, csrfRequired, async (req, res) => {
+  const { email, sessionKey } = req.body || {};
+  if (!sessionKey || typeof sessionKey !== 'string' || !sessionKey.trim()) {
+    return res.status(400).json({ error: 'session_key_required' });
+  }
+  let newAccount;
+  await withStoreLock(async (store) => {
+    const id = `acc-${Date.now()}`;
+    newAccount = {
+      id,
+      email: (email || '').trim() || `${id}@local`,
+      sessionKey: sessionKey.trim(),
+      dailyLimit: Number(process.env.CLAUDE_DAILY_LIMIT || 0),
+      status: 'active'
+    };
+    store.accounts.push(newAccount);
+  });
+  return res.json({ ok: true, account: { id: newAccount.id, email: newAccount.email, status: newAccount.status } });
+});
+
+// NOTE: /bulk, /test-all must be registered BEFORE /:id to avoid Express matching them as an id param.
+
+// Bulk import: each line is "sessionKey" or "email:sessionKey" or "email sessionKey"
+app.post('/api/admin/accounts/bulk', authRequired, csrfRequired, async (req, res) => {
+  const { text } = req.body || {};
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'text_required' });
+  }
+  const lines = text.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+  const added = [];
+  const skipped = [];
+  await withStoreLock(async (store) => {
+    for (const line of lines) {
+      // Support: "email sessionKey", "email:sessionKey", or just "sessionKey"
+      let email = '';
+      let sessionKey = '';
+      const spaceIdx = line.indexOf(' ');
+      const colonIdx = line.indexOf(':');
+      if (spaceIdx > 0 && !line.startsWith('sk-ant-')) {
+        email = line.slice(0, spaceIdx).trim();
+        sessionKey = line.slice(spaceIdx + 1).trim();
+      } else if (colonIdx > 0 && !line.startsWith('sk-ant-')) {
+        email = line.slice(0, colonIdx).trim();
+        sessionKey = line.slice(colonIdx + 1).trim();
+      } else {
+        sessionKey = line;
+      }
+      if (!sessionKey) {
+        skipped.push(line);
+        continue;
+      }
+      // Skip duplicates by sessionKey
+      if (store.accounts.some((a) => a.sessionKey === sessionKey)) {
+        skipped.push(line);
+        continue;
+      }
+      const id = `acc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const account = {
+        id,
+        email: email || `${id}@local`,
+        sessionKey,
+        dailyLimit: Number(process.env.CLAUDE_DAILY_LIMIT || 0),
+        status: 'active'
+      };
+      store.accounts.push(account);
+      added.push({ id: account.id, email: account.email });
+    }
+  });
+  return res.json({ ok: true, added: added.length, skipped: skipped.length });
+});
+
+// Test all accounts: verify sessionKey format; mark obviously invalid ones as banned
+app.post('/api/admin/accounts/test-all', authRequired, csrfRequired, async (req, res) => {
+  const results = [];
+  await withStoreLock(async (store) => {
+    for (const account of store.accounts) {
+      if (account.status === 'banned') {
+        results.push({ id: account.id, email: account.email, result: 'skipped_banned' });
+        continue;
+      }
+      // Basic format check: must start with sk-ant-
+      const valid = typeof account.sessionKey === 'string' && account.sessionKey.startsWith('sk-ant-');
+      if (!valid) {
+        account.status = 'banned';
+        results.push({ id: account.id, email: account.email, result: 'banned' });
+      } else {
+        results.push({ id: account.id, email: account.email, result: 'ok' });
+      }
+    }
+  });
+  return res.json({ ok: true, results });
+});
+
+// Test a single account: verify sessionKey format; mark obviously invalid ones as banned
+app.post('/api/admin/accounts/:id/test', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let result = null;
+  await withStoreLock(async (store) => {
+    const account = store.accounts.find((a) => a.id === id);
+    if (!account) return;
+    if (account.status === 'banned') {
+      result = { id: account.id, email: account.email, result: 'skipped_banned' };
+      return;
+    }
+    const valid = typeof account.sessionKey === 'string' && account.sessionKey.startsWith('sk-ant-');
+    if (!valid) {
+      account.status = 'banned';
+      result = { id: account.id, email: account.email, result: 'banned' };
+    } else {
+      result = { id: account.id, email: account.email, result: 'ok' };
+    }
+  });
+  if (!result) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true, ...result });
+});
+
+// Restore rate-limited / banned account back to active
+app.post('/api/admin/accounts/:id/unrate', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let found = false;
+  await withStoreLock(async (store) => {
+    const account = store.accounts.find((a) => a.id === id);
+    if (account) {
+      account.status = 'active';
+      found = true;
+    }
+  });
+  if (!found) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true });
+});
+
+app.delete('/api/admin/accounts/:id', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let found = false;
+  await withStoreLock(async (store) => {
+    const before = store.accounts.length;
+    store.accounts = store.accounts.filter((a) => a.id !== id);
+    found = store.accounts.length < before;
+  });
+  if (!found) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true });
 });
 
 app.use('/admin', express.static(path.join(__dirname, '..', 'public')));

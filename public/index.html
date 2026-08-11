@@ -5,16 +5,152 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Claude2API Admin</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
-      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-      input { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
-      button { padding: 8px 12px; cursor: pointer; }
+      *, *::before, *::after { box-sizing: border-box; }
+
+      body {
+        font-family: 'Segoe UI', Arial, sans-serif;
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(135deg, #fef9c3 0%, #fde68a 50%, #fbbf24 100%);
+        color: #1c1917;
+        padding: 28px 16px 48px;
+      }
+
+      h1 {
+        text-align: center;
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #78350f;
+        margin: 0 0 28px;
+        letter-spacing: 0.5px;
+        text-shadow: 0 1px 2px rgba(255,255,255,.6);
+      }
+
+      h3 {
+        margin: 0 0 14px;
+        font-size: 1rem;
+        font-weight: 700;
+        color: #92400e;
+        border-left: 4px solid #f59e0b;
+        padding-left: 10px;
+      }
+
+      .card {
+        background: #fff;
+        border: none;
+        border-radius: 16px;
+        padding: 20px 22px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 18px rgba(180,120,0,.13), 0 1px 4px rgba(0,0,0,.06);
+        transition: box-shadow .2s;
+      }
+      .card:hover { box-shadow: 0 8px 28px rgba(180,120,0,.18), 0 2px 6px rgba(0,0,0,.08); }
+
+      input, textarea {
+        padding: 9px 12px;
+        margin: 5px 0;
+        width: 100%;
+        border: 1.5px solid #fcd34d;
+        border-radius: 8px;
+        font-size: 14px;
+        background: #fffbeb;
+        color: #1c1917;
+        outline: none;
+        transition: border-color .15s, box-shadow .15s;
+      }
+      input:focus, textarea:focus {
+        border-color: #f59e0b;
+        box-shadow: 0 0 0 3px rgba(245,158,11,.2);
+        background: #fff;
+      }
+      textarea { resize: vertical; }
+
+      button {
+        padding: 9px 16px;
+        cursor: pointer;
+        border-radius: 8px;
+        border: 1.5px solid #fbbf24;
+        background: linear-gradient(135deg, #fde68a, #fbbf24);
+        color: #78350f;
+        font-weight: 600;
+        font-size: 14px;
+        transition: filter .15s, box-shadow .15s;
+        white-space: nowrap;
+      }
+      button:hover { filter: brightness(1.06); box-shadow: 0 2px 8px rgba(245,158,11,.35); }
+      button:active { filter: brightness(.96); }
+
       table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      th {
+        background: #fef3c7;
+        color: #92400e;
+        font-weight: 700;
+        font-size: 13px;
+        padding: 10px 10px;
+        border-bottom: 2px solid #fde68a;
+        text-align: left;
+      }
+      td {
+        padding: 9px 10px;
+        border-bottom: 1px solid #fef3c7;
+        font-size: 14px;
+        vertical-align: middle;
+      }
+      tr:last-child td { border-bottom: none; }
+      tr:hover td { background: #fffbeb; }
+
       #dashboard { display: none; }
-      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-      .msg { margin-top: 8px; color: #0a7; }
-      .err { color: #c00; }
+
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+      @media (max-width: 680px) { .row { grid-template-columns: 1fr; } }
+
+      .msg { margin-top: 8px; color: #059669; min-height: 1.2em; font-size: 13px; }
+      .err { color: #dc2626; }
+
+      .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 700; letter-spacing: .3px; }
+      .badge-active  { background: #d1fae5; color: #065f46; }
+      .badge-limited { background: #fef3c7; color: #92400e; }
+      .badge-banned  { background: #fee2e2; color: #991b1b; }
+
+      .btn-sm { padding: 4px 10px; font-size: 12px; margin: 0 2px; border-radius: 6px; font-weight: 600; }
+      .btn-danger { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+      .btn-danger:hover { background: #fecaca; }
+      .btn-warn   { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
+      .btn-warn:hover { background: #fde68a; }
+      .btn-info   { background: #dbeafe; border-color: #93c5fd; color: #1e40af; }
+      .btn-info:hover { background: #bfdbfe; }
+
+      .filter-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .pill {
+        padding: 5px 16px; border-radius: 20px; font-size: 13px; cursor: pointer;
+        border: 2px solid #fcd34d; background: #fef9c3; color: #78350f;
+        user-select: none; transition: border-color .15s, background .15s;
+        font-weight: 500;
+      }
+      .pill.active-pill  { border-color: #065f46; background: #d1fae5; color: #065f46; }
+      .pill.limited-pill { border-color: #92400e; background: #fef3c7; color: #92400e; }
+      .pill.banned-pill  { border-color: #991b1b; background: #fee2e2; color: #991b1b; }
+      .pill.selected     { font-weight: 700; box-shadow: 0 0 0 2px rgba(0,0,0,.12); }
+
+      details > summary { cursor: pointer; font-weight: 700; color: #92400e; padding: 4px 0; }
+      details > summary:hover { color: #78350f; }
+
+      code {
+        background: #fef3c7;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: #92400e;
+      }
+
+      .page-wrap { max-width: 960px; margin: 0 auto; }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+      }
     </style>
   </head>
   <body>
@@ -29,12 +165,14 @@
     </div>
 
     <div id="dashboard">
+      <div style="text-align:right;margin-bottom:8px;">
+        <button id="logoutBtn" class="btn-sm btn-danger">退出登录</button>
+      </div>
       <div class="row">
         <div class="card">
           <h3>修改管理员密码</h3>
-          <input id="oldPassword" placeholder="旧密码" type="password" />
           <input id="newPassword" placeholder="新密码（至少8位）" type="password" />
-          <button id="changePassBtn">修改密码</button>
+          <button id="changePassBtn">更换密码</button>
           <div id="passMsg" class="msg"></div>
         </div>
 
@@ -57,10 +195,65 @@
           </div>
         </div>
       </div>
+
+      <div class="card">
+        <h3>账号管理（Cookie / Session Key）</h3>
+
+        <!-- Single add -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <input id="newEmail" placeholder="邮箱（可选，留空自动生成）" style="flex:1;min-width:180px;" />
+          <input id="newSessionKey" placeholder="Session Key（sk-ant-sid01-...）" style="flex:2;min-width:240px;" />
+          <button id="addAccountBtn">添加账号</button>
+        </div>
+
+        <!-- Bulk import -->
+        <details style="margin-bottom:8px;">
+          <summary style="cursor:pointer;font-weight:bold;">▶ 批量导入</summary>
+          <div style="margin-top:8px;">
+            <p style="margin:4px 0;font-size:13px;color:#555;">
+              每行一条，支持格式：<code>sessionKey</code>、<code>email:sessionKey</code>、<code>email sessionKey</code>
+            </p>
+            <textarea id="bulkText" rows="6" placeholder="sk-ant-sid01-aaa&#10;user@example.com:sk-ant-sid01-bbb&#10;user2@example.com sk-ant-sid01-ccc"></textarea>
+            <button id="bulkImportBtn" style="margin-top:4px;">批量导入</button>
+          </div>
+        </details>
+
+        <!-- Top actions -->
+        <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button id="testAllBtn" class="btn-info">一键测活</button>
+          <span style="font-size:12px;color:#555;">检测所有非封禁账号的 Session Key 格式有效性，失效自动标记为封禁</span>
+        </div>
+
+        <div id="accountMsg" class="msg"></div>
+
+        <!-- Status filter pills -->
+        <div class="filter-pills" id="filterPills">
+          <span class="pill selected" data-filter="all">全部 <span id="cnt-all">0</span></span>
+          <span class="pill active-pill" data-filter="active">活跃 <span id="cnt-active">0</span></span>
+          <span class="pill limited-pill" data-filter="limited">冷却 <span id="cnt-limited">0</span></span>
+          <span class="pill banned-pill" data-filter="banned">封禁 <span id="cnt-banned">0</span></span>
+        </div>
+
+        <!-- Account list -->
+        <div style="overflow:auto;margin-top:4px;">
+          <table>
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <script>
       let csrfToken = null;
+      let allAccounts = [];
+      let currentFilter = 'all';
 
       async function api(path, method = 'GET', body) {
         const headers = body ? { 'Content-Type': 'application/json' } : {};
@@ -105,19 +298,159 @@
         renderStats(data.items || []);
       }
 
-      async function checkLogin() {
+      function statusBadge(status) {
+        const map = { active: 'badge-active', limited: 'badge-limited', banned: 'badge-banned' };
+        const cls = map[status] || 'badge-limited';
+        return `<span class="badge ${cls}">${status}</span>`;
+      }
+
+      function updateCounts() {
+        const counts = { all: allAccounts.length, active: 0, limited: 0, banned: 0 };
+        allAccounts.forEach((a) => {
+          if (counts[a.status] !== undefined) counts[a.status] += 1;
+          else counts.limited += 1; // unknown statuses shown under limited
+        });
+        document.getElementById('cnt-all').textContent = counts.all;
+        document.getElementById('cnt-active').textContent = counts.active;
+        document.getElementById('cnt-limited').textContent = counts.limited;
+        document.getElementById('cnt-banned').textContent = counts.banned;
+      }
+
+      function renderAccountRows() {
+        const filtered = currentFilter === 'all'
+          ? allAccounts
+          : allAccounts.filter((a) => a.status === currentFilter);
+
+        const tbody = document.getElementById('accountsBody');
+        tbody.innerHTML = '';
+        filtered.forEach((acc) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${acc.email}</td>
+            <td>${statusBadge(acc.status)}</td>
+            <td>
+              <button class="btn-sm btn-info" data-id="${acc.id}" data-action="test">刷新</button>
+              ${acc.status !== 'active' ? `<button class="btn-sm btn-warn" data-id="${acc.id}" data-action="unrate">恢复</button>` : ''}
+              <button class="btn-sm btn-danger" data-id="${acc.id}" data-action="delete">删除</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+
+      async function loadAccounts() {
         try {
-          await api('/api/admin/me');
-          const csrf = await api('/api/admin/csrf');
-          csrfToken = csrf.token;
-          document.getElementById('login').style.display = 'none';
-          document.getElementById('dashboard').style.display = 'block';
-          await loadStats();
-        } catch (_) {
-          document.getElementById('login').style.display = 'block';
-          document.getElementById('dashboard').style.display = 'none';
+          const data = await api('/api/admin/accounts');
+          allAccounts = data.items || [];
+          updateCounts();
+          renderAccountRows();
+        } catch (e) {
+          setMsg('accountMsg', `加载账号失败: ${e.message}`, true);
         }
       }
+
+      // Filter pills
+      document.getElementById('filterPills').addEventListener('click', (e) => {
+        const pill = e.target.closest('[data-filter]');
+        if (!pill) return;
+        currentFilter = pill.dataset.filter;
+        document.querySelectorAll('#filterPills .pill').forEach((p) => p.classList.remove('selected'));
+        pill.classList.add('selected');
+        renderAccountRows();
+      });
+
+      // Account table actions
+      document.getElementById('accountsBody').addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-action]');
+        if (!btn) return;
+        const { id, action } = btn.dataset;
+        try {
+          if (action === 'delete') {
+            if (!confirm('确认删除该账号？')) return;
+            await api(`/api/admin/accounts/${id}`, 'DELETE');
+            setMsg('accountMsg', '账号已删除');
+          } else if (action === 'unrate') {
+            await api(`/api/admin/accounts/${id}/unrate`, 'POST');
+            setMsg('accountMsg', '账号已恢复为 active');
+          } else if (action === 'test') {
+            const data = await api(`/api/admin/accounts/${id}/test`, 'POST');
+            const label = data.result === 'ok' ? '有效' : data.result === 'banned' ? '已封禁' : '已跳过（封禁）';
+            setMsg('accountMsg', `账号 ${data.email} 检测结果：${label}`);
+          }
+          await Promise.all([loadAccounts(), loadStats()]);
+        } catch (e) {
+          setMsg('accountMsg', `操作失败: ${e.message}`, true);
+        }
+      });
+
+      document.getElementById('addAccountBtn').onclick = async () => {
+        const email = document.getElementById('newEmail').value.trim();
+        const sessionKey = document.getElementById('newSessionKey').value.trim();
+        try {
+          await api('/api/admin/accounts', 'POST', { email, sessionKey });
+          setMsg('accountMsg', '账号添加成功');
+          document.getElementById('newEmail').value = '';
+          document.getElementById('newSessionKey').value = '';
+          await Promise.all([loadAccounts(), loadStats()]);
+        } catch (e) {
+          setMsg('accountMsg', `添加失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('bulkImportBtn').onclick = async () => {
+        const text = document.getElementById('bulkText').value;
+        if (!text.trim()) {
+          setMsg('accountMsg', '请先填写要导入的内容', true);
+          return;
+        }
+        try {
+          const data = await api('/api/admin/accounts/bulk', 'POST', { text });
+          setMsg('accountMsg', `批量导入完成：成功 ${data.added} 条，跳过 ${data.skipped} 条（重复或格式错误）`);
+          document.getElementById('bulkText').value = '';
+          await Promise.all([loadAccounts(), loadStats()]);
+        } catch (e) {
+          setMsg('accountMsg', `批量导入失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('testAllBtn').onclick = async () => {
+        setMsg('accountMsg', '测活中，请稍候…');
+        try {
+          const data = await api('/api/admin/accounts/test-all', 'POST');
+          const banned = (data.results || []).filter((r) => r.result === 'banned').length;
+          const ok = (data.results || []).filter((r) => r.result === 'ok').length;
+          setMsg('accountMsg', `测活完成：有效 ${ok} 个，已封禁 ${banned} 个`);
+          await Promise.all([loadAccounts(), loadStats()]);
+        } catch (e) {
+          setMsg('accountMsg', `测活失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('logoutBtn').onclick = async () => {
+        try { await api('/api/admin/logout', 'POST'); } catch (_) { /* ignore */ }
+        csrfToken = null;
+        allAccounts = [];
+        currentFilter = 'all';
+        document.querySelectorAll('#filterPills .pill').forEach((p, i) => {
+          p.classList.toggle('selected', i === 0);
+        });
+        document.getElementById('login').style.display = 'block';
+        document.getElementById('dashboard').style.display = 'none';
+      };
+
+      document.getElementById('changePassBtn').onclick = async () => {
+        try {
+          await api('/api/admin/password', 'POST', {
+            newPassword: document.getElementById('newPassword').value
+          });
+          setMsg('passMsg', '密码修改成功');
+          document.getElementById('newPassword').value = '';
+        } catch (e) {
+          setMsg('passMsg', `修改失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('refreshBtn').onclick = loadStats;
 
       document.getElementById('loginBtn').onclick = async () => {
         try {
@@ -132,19 +465,19 @@
         }
       };
 
-      document.getElementById('changePassBtn').onclick = async () => {
+      async function checkLogin() {
         try {
-          await api('/api/admin/password', 'POST', {
-            oldPassword: document.getElementById('oldPassword').value,
-            newPassword: document.getElementById('newPassword').value
-          });
-          setMsg('passMsg', '密码修改成功');
-        } catch (e) {
-          setMsg('passMsg', `修改失败: ${e.message}`, true);
+          await api('/api/admin/me');
+          const csrf = await api('/api/admin/csrf');
+          csrfToken = csrf.token;
+          document.getElementById('login').style.display = 'none';
+          document.getElementById('dashboard').style.display = 'block';
+          await Promise.all([loadStats(), loadAccounts()]);
+        } catch (_) {
+          document.getElementById('login').style.display = 'block';
+          document.getElementById('dashboard').style.display = 'none';
         }
-      };
-
-      document.getElementById('refreshBtn').onclick = loadStats;
+      }
 
       checkLogin();
     </script>
