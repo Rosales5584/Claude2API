@@ -218,7 +218,7 @@ test('passes through streaming responses and can forward bearer auth upstream', 
   }
 });
 
-test('returns 503 when upstream is not configured', async () => {
+test('returns 503 when no active accounts are configured', async () => {
   resetEnv({
     SESSION_SECRET: 'test-secret',
     CLAUDE_API_KEY: 'local-key',
@@ -249,10 +249,7 @@ test('returns 503 when upstream is not configured', async () => {
 
     assert.equal(response.status, 503);
     const payload = await response.json();
-    assert.deepEqual(payload, {
-      error: 'upstream_not_configured',
-      message: 'UPSTREAM_MESSAGES_URL is required for /v1/messages'
-    });
+    assert.equal(payload.error, 'no_active_account');
   } finally {
     await close(appServer);
   }
@@ -312,5 +309,155 @@ test('passes through upstream error status and json body', async () => {
   } finally {
     await close(appServer);
     await close(upstream);
+  }
+});
+
+test('routes /v1/messages through account pool session key to claude web api', async () => {
+  const orgUuid = 'org-test-uuid';
+  const captured = {};
+
+  // Simulate claude.ai web endpoints
+  const claudeWeb = http.createServer((req, res) => {
+    if (req.url === '/api/organizations') {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([{ uuid: orgUuid, name: 'Test Org' }]));
+      return;
+    }
+    if (req.url === `/api/organizations/${orgUuid}/chat_conversations`) {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ uuid: 'conv-uuid' }));
+      return;
+    }
+    if (req.url.endsWith('/completion')) {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        captured.completionBody = JSON.parse(body);
+        captured.cookie = req.headers.cookie;
+        res.setHeader('content-type', 'text/event-stream');
+        res.write('data: ' + JSON.stringify({ completion: 'web ok', stop_reason: null }) + '\n\n');
+        res.write('data: ' + JSON.stringify({ completion: '', stop_reason: 'stop_sequence' }) + '\n\n');
+        res.end();
+      });
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  const claudePort = await listen(claudeWeb);
+
+  const storeFile = createTempStoreFile();
+  resetEnv({
+    SESSION_SECRET: 'test-secret',
+    CLAUDE_API_KEY: 'local-key',
+    CLAUDE_SESSION_KEYS: 'sk-ant-sid01-test',
+    CLAUDE_WEB_BASE: `http://127.0.0.1:${claudePort}`,
+    STORE_FILE: storeFile
+  });
+
+  const { startServer } = loadApp();
+  const appServer = startServer(0);
+  await new Promise((resolve) => appServer.once('listening', resolve));
+  const appPort = appServer.address().port;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${appPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'local-key' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: '你好' }]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.type, 'message');
+    assert.equal(payload.role, 'assistant');
+    assert.ok(payload.content[0].text.includes('web ok'));
+    // Session key sent as cookie
+    assert.ok(captured.cookie && captured.cookie.includes('sk-ant-sid01-test'));
+    // Usage event recorded with accountId
+    await waitFor(() => {
+      const store = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+      assert.equal(store.usageEvents.length, 1);
+      assert.ok(store.usageEvents[0].accountId);
+      assert.equal(store.usageEvents[0].success, true);
+    });
+  } finally {
+    await close(appServer);
+    await close(claudeWeb);
+  }
+});
+
+test('returns tool_use block when claude web response contains ReAct <tool_use> markup', async () => {
+  const orgUuid = 'org-tool-uuid';
+
+  const claudeWeb = http.createServer((req, res) => {
+    if (req.url === '/api/organizations') {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([{ uuid: orgUuid }]));
+      return;
+    }
+    if (req.url === `/api/organizations/${orgUuid}/chat_conversations`) {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ uuid: 'conv-tool' }));
+      return;
+    }
+    if (req.url.endsWith('/completion')) {
+      res.setHeader('content-type', 'text/event-stream');
+      const toolText = '<tool_use>\n{"name":"get_weather","input":{"location":"Beijing"}}\n</tool_use>';
+      res.write('data: ' + JSON.stringify({ completion: toolText, stop_reason: null }) + '\n\n');
+      res.end();
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  const claudePort = await listen(claudeWeb);
+
+  resetEnv({
+    SESSION_SECRET: 'test-secret',
+    CLAUDE_API_KEY: 'local-key',
+    CLAUDE_SESSION_KEYS: 'sk-ant-sid01-tool',
+    CLAUDE_WEB_BASE: `http://127.0.0.1:${claudePort}`,
+    STORE_FILE: createTempStoreFile()
+  });
+
+  const { startServer } = loadApp();
+  const appServer = startServer(0);
+  await new Promise((resolve) => appServer.once('listening', resolve));
+  const appPort = appServer.address().port;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${appPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'local-key' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 100,
+        tools: [{
+          name: 'get_weather',
+          description: 'Get weather',
+          input_schema: { type: 'object', properties: { location: { type: 'string' } } }
+        }],
+        messages: [{ role: 'user', content: '查询北京天气' }]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.stop_reason, 'tool_use');
+    assert.equal(payload.content.length, 1);
+    const block = payload.content[0];
+    assert.equal(block.type, 'tool_use');
+    assert.equal(block.name, 'get_weather');
+    assert.deepEqual(block.input, { location: 'Beijing' });
+    assert.ok(block.id && block.id.startsWith('toolu_'));
+  } finally {
+    await close(appServer);
+    await close(claudeWeb);
   }
 });

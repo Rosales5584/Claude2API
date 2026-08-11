@@ -7,8 +7,12 @@ const { readStore, withStoreLock } = require('./store');
 
 const app = express();
 
+const CLAUDE_WEB_BASE = (process.env.CLAUDE_WEB_BASE || 'https://claude.ai').replace(/\/$/, '');
+
 const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+let rrIndex = 0;
 
 function toMillis(ts) {
   return new Date(ts).getTime();
@@ -45,6 +49,11 @@ function countInputImages(messages) {
     }
   }
   return total;
+}
+
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.max(1, Math.ceil(String(text).length / 4));
 }
 
 function thinkingEnabled(body, routedModel) {
@@ -198,6 +207,326 @@ async function proxyToUpstream(req, res, stream) {
   }
 }
 
+function writeSse(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+// ── Account Pool ──────────────────────────────────────────────────────────
+
+function pickAccount(store) {
+  const now = Date.now();
+  const todayStart = getTodayStart(new Date(now));
+  const active = store.accounts.filter((a) => {
+    if (a.status !== 'active') return false;
+    const limit = Number(a.dailyLimit || 0);
+    if (limit <= 0) return true;
+    const todayCount = store.usageEvents.filter(
+      (e) => e.accountId === a.id && toMillis(e.timestamp) >= todayStart
+    ).length;
+    return todayCount < limit;
+  });
+  if (!active.length) return null;
+  const chosen = active[rrIndex % active.length];
+  rrIndex = (rrIndex + 1) % active.length;
+  return chosen;
+}
+
+// ── Claude.ai Web Transport ───────────────────────────────────────────────
+
+function buildWebHeaders(sessionKey, extra) {
+  return Object.assign({
+    Cookie: `sessionKey=${sessionKey}`,
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    Referer: `${CLAUDE_WEB_BASE}/`
+  }, extra || {});
+}
+
+async function fetchWithShortTimeout(url, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    return await fetch(url, Object.assign({}, init, { signal: controller.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getWebOrgId(sessionKey) {
+  const res = await fetchWithShortTimeout(
+    `${CLAUDE_WEB_BASE}/api/organizations`,
+    { method: 'GET', headers: buildWebHeaders(sessionKey, { Accept: 'application/json' }) }
+  );
+  if (!res.ok) {
+    throw Object.assign(new Error(`getOrgId HTTP ${res.status}`), { httpStatus: res.status });
+  }
+  const orgs = await res.json();
+  if (!Array.isArray(orgs) || !orgs.length) throw new Error('no organizations found');
+  return orgs[0].uuid;
+}
+
+async function createWebConversation(sessionKey, orgId, convUuid) {
+  const res = await fetchWithShortTimeout(
+    `${CLAUDE_WEB_BASE}/api/organizations/${orgId}/chat_conversations`,
+    {
+      method: 'POST',
+      headers: buildWebHeaders(sessionKey, { 'Content-Type': 'application/json', Accept: 'application/json' }),
+      body: JSON.stringify({ uuid: convUuid, name: '' })
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw Object.assign(
+      new Error(`createConversation HTTP ${res.status}: ${text}`),
+      { httpStatus: res.status }
+    );
+  }
+}
+
+function buildWebPrompt(messages, tools, systemText) {
+  const parts = [];
+
+  if (systemText) {
+    parts.push(`<system>\n${systemText}\n</system>`);
+  }
+
+  if (tools && tools.length > 0) {
+    let toolDefs = 'You have access to the following tools. When you need to use a tool, output:\n<tool_use>\n{"name": "tool_name", "input": {...}}\n</tool_use>';
+    for (const tool of tools) {
+      let def = `Tool: ${tool.name}`;
+      if (tool.description) def += `\nDescription: ${tool.description}`;
+      if (tool.input_schema) def += `\nInput schema: ${JSON.stringify(tool.input_schema)}`;
+      toolDefs += `\n\n${def}`;
+    }
+    parts.push(toolDefs);
+  }
+
+  for (const msg of messages) {
+    const role = msg.role === 'assistant' ? 'Assistant' : 'Human';
+    const blocks = normalizeContent(msg.content);
+    const text = blocks.map((b) => {
+      if (b.type === 'text') return b.text || '';
+      if (b.type === 'tool_use') {
+        return `<tool_use>\n${JSON.stringify({ name: b.name, input: b.input })}\n</tool_use>`;
+      }
+      if (b.type === 'tool_result') {
+        const c = typeof b.content === 'string' ? b.content
+          : Array.isArray(b.content) ? b.content.map((p) => p.text || '').join('\n') : '';
+        return `<tool_result id="${b.tool_use_id}">\n${c}\n</tool_result>`;
+      }
+      if (b.type === 'image') return '[image]';
+      return '';
+    }).filter(Boolean).join('\n\n');
+    parts.push(`${role}: ${text}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+function parseToolUseFromText(text, tools) {
+  if (!tools || !tools.length || !text) return null;
+  const match = text.match(/<tool_use>\s*([\s\S]*?)\s*<\/tool_use>/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]);
+    if (!parsed.name) return null;
+    return {
+      type: 'tool_use',
+      id: `toolu_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+      name: parsed.name,
+      input: parsed.input || {}
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function proxyToClaudeWeb(req, res, account) {
+  const body = req.body || {};
+  const stream = Boolean(body.stream);
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  const system = typeof body.system === 'string' ? body.system
+    : Array.isArray(body.system) ? body.system.map((b) => (b.type === 'text' ? b.text : '')).join('\n') : '';
+  const requestedModel = typeof body.model === 'string' ? body.model : 'claude-sonnet-4-6';
+  const { sessionKey } = account;
+
+  const orgId = await getWebOrgId(sessionKey);
+  const convUuid = crypto.randomUUID();
+  await createWebConversation(sessionKey, orgId, convUuid);
+
+  const prompt = buildWebPrompt(messages, tools, system);
+  const webBody = {
+    prompt,
+    attachments: [],
+    files: [],
+    model: { type: 'slug', value: requestedModel },
+    rendering_mode: 'rich',
+    timezone: 'UTC'
+  };
+
+  const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS || 120000);
+  const controller = new AbortController();
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  req.on('close', () => controller.abort());
+
+  let webRes;
+  try {
+    webRes = await fetch(
+      `${CLAUDE_WEB_BASE}/api/organizations/${orgId}/chat_conversations/${convUuid}/completion`,
+      {
+        method: 'POST',
+        headers: buildWebHeaders(sessionKey, {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          'anthropic-client-platform': 'web_claude_ai'
+        }),
+        body: JSON.stringify(webBody),
+        signal: controller.signal
+      }
+    );
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    throw err;
+  }
+
+  if (!webRes.ok) {
+    if (timer) clearTimeout(timer);
+    const httpStatus = webRes.status;
+    const errText = await webRes.text().catch(() => '');
+    throw Object.assign(new Error(errText || `HTTP ${httpStatus}`), { httpStatus });
+  }
+
+  const messageId = `msg_${crypto.randomUUID()}`;
+  let fullText = '';
+  let stopReason = 'end_turn';
+  let outputTokens = 0;
+  const inputTokens = estimateTokens(prompt);
+
+  if (stream) {
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    writeSse(res, 'message_start', {
+      type: 'message_start',
+      message: {
+        id: messageId, type: 'message', role: 'assistant', model: requestedModel,
+        content: [], stop_reason: null, stop_sequence: null,
+        usage: { input_tokens: inputTokens, output_tokens: 0 }
+      }
+    });
+  }
+
+  let blockIndex = 0;
+  let textBlockOpen = false;
+
+  try {
+    let buf = '';
+    for await (const rawChunk of webRes.body) {
+      buf += Buffer.from(rawChunk).toString('utf8');
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6);
+        if (!raw || raw === '[DONE]') continue;
+        let evt;
+        try { evt = JSON.parse(raw); } catch { continue; }
+
+        if (typeof evt.type === 'string') {
+          // Modern format: events look like Anthropic API events
+          if (evt.type === 'content_block_start' && evt.content_block && evt.content_block.type === 'text') {
+            if (stream) {
+              writeSse(res, 'content_block_start', Object.assign({}, evt, { index: blockIndex }));
+              textBlockOpen = true;
+            }
+          } else if (evt.type === 'content_block_delta') {
+            const text = (evt.delta && (evt.delta.text || evt.delta.thinking)) || '';
+            fullText += text;
+            outputTokens += estimateTokens(text);
+            if (stream) writeSse(res, 'content_block_delta', Object.assign({}, evt, { index: blockIndex }));
+          } else if (evt.type === 'content_block_stop') {
+            if (stream && textBlockOpen) {
+              writeSse(res, 'content_block_stop', { type: 'content_block_stop', index: blockIndex });
+              textBlockOpen = false;
+              blockIndex += 1;
+            }
+          } else if (evt.type === 'message_delta') {
+            if (evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;
+            if (evt.usage && evt.usage.output_tokens) outputTokens = evt.usage.output_tokens;
+          }
+          // message_stop handled after loop
+        } else if (typeof evt.completion === 'string') {
+          // Legacy claude.ai format: {"completion": "...", "stop_reason": null}
+          const text = evt.completion;
+          if (text) {
+            fullText += text;
+            outputTokens += estimateTokens(text);
+            if (stream) {
+              if (!textBlockOpen) {
+                writeSse(res, 'content_block_start', {
+                  type: 'content_block_start', index: blockIndex,
+                  content_block: { type: 'text', text: '' }
+                });
+                textBlockOpen = true;
+              }
+              writeSse(res, 'content_block_delta', {
+                type: 'content_block_delta', index: blockIndex,
+                delta: { type: 'text_delta', text }
+              });
+            }
+          }
+          if (evt.stop_reason && evt.stop_reason !== 'null') {
+            stopReason = evt.stop_reason === 'stop_sequence' ? 'stop_sequence' : 'end_turn';
+          }
+        }
+      }
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  // Parse ReAct-style tool use from accumulated text
+  const toolUse = parseToolUseFromText(fullText, tools);
+  if (toolUse) stopReason = 'tool_use';
+
+  if (stream) {
+    if (textBlockOpen) {
+      writeSse(res, 'content_block_stop', { type: 'content_block_stop', index: blockIndex });
+      blockIndex += 1;
+    }
+    if (toolUse) {
+      writeSse(res, 'content_block_start', {
+        type: 'content_block_start', index: blockIndex,
+        content_block: { type: 'tool_use', id: toolUse.id, name: toolUse.name, input: {} }
+      });
+      writeSse(res, 'content_block_delta', {
+        type: 'content_block_delta', index: blockIndex,
+        delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUse.input) }
+      });
+      writeSse(res, 'content_block_stop', { type: 'content_block_stop', index: blockIndex });
+    }
+    writeSse(res, 'message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: outputTokens }
+    });
+    writeSse(res, 'message_stop', { type: 'message_stop' });
+    return res.end();
+  }
+
+  const content = toolUse ? [toolUse] : [{ type: 'text', text: fullText }];
+  return res.json({
+    id: messageId, type: 'message', role: 'assistant', model: requestedModel,
+    content, stop_reason: stopReason,
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens }
+  });
+}
+
 function computeAccountStats(store) {
   const now = Date.now();
   const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
@@ -269,37 +598,102 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
   const withThinking = thinkingEnabled(req.body, requestedModel || '');
   const upstreamUrl = getUpstreamUrl();
   let success = false;
+  let accountId = null;
 
-  if (!upstreamUrl) {
-    return res.status(503).json({
-      error: 'upstream_not_configured',
-      message: 'UPSTREAM_MESSAGES_URL is required for /v1/messages'
-    });
+  // Optional override: if UPSTREAM_MESSAGES_URL is configured, proxy directly to it
+  if (upstreamUrl) {
+    try {
+      await proxyToUpstream(req, res, stream);
+      success = res.statusCode >= 200 && res.statusCode < 400;
+      return;
+    } catch (error) {
+      success = false;
+      if (error?.name === 'AbortError') {
+        if (!res.headersSent) {
+          return res.status(504).json({
+            error: 'upstream_request_timeout',
+            message: 'upstream request timed out'
+          });
+        }
+        return;
+      }
+      return res.status(502).json({
+        error: 'upstream_request_failed',
+        message: error instanceof Error ? error.message : 'unknown_error'
+      });
+    } finally {
+      await withStoreLock(async (store) => {
+        store.usageEvents.push({
+          accountId: null,
+          requestedModel,
+          routedModel: requestedModel,
+          stream,
+          hasTools: requestTools.length > 0,
+          usedTool: false,
+          hasImages: imageCount > 0,
+          hasThinking: withThinking,
+          timestamp: new Date().toISOString(),
+          success
+        });
+        const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        store.usageEvents = store.usageEvents.filter((e) => toMillis(e.timestamp) >= cutoff);
+      });
+    }
+  }
+
+  // No upstream URL: pick an active Web account and proxy via Claude.ai web transport
+  let account = null;
+  await withStoreLock(async (store) => {
+    account = pickAccount(store);
+  });
+
+  if (!account) {
+    return res.status(503).json({ error: 'no_active_account', message: 'no active account available' });
   }
 
   try {
-    await proxyToUpstream(req, res, stream);
-    success = res.statusCode >= 200 && res.statusCode < 400;
-    return;
-  } catch (error) {
+    await proxyToClaudeWeb(req, res, account);
+    success = true;
+    accountId = account.id;
+  } catch (err) {
     success = false;
-    if (error?.name === 'AbortError') {
+    if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
       if (!res.headersSent) {
-        return res.status(504).json({
-          error: 'upstream_request_timeout',
-          message: 'upstream request timed out'
-        });
+        return res.status(504).json({ error: 'request_timeout', message: 'request timed out' });
       }
       return;
     }
-    return res.status(502).json({
-      error: 'upstream_request_failed',
-      message: error instanceof Error ? error.message : 'unknown_error'
-    });
+    const httpStatus = err?.httpStatus;
+    if (httpStatus === 401 || httpStatus === 403) {
+      await withStoreLock(async (store) => {
+        const acc = store.accounts.find((a) => a.id === account.id);
+        if (acc) acc.status = 'banned';
+      });
+      if (!res.headersSent) {
+        return res.status(502).json({ error: 'account_auth_failed', message: 'session key rejected' });
+      }
+      return;
+    }
+    if (httpStatus === 429) {
+      await withStoreLock(async (store) => {
+        const acc = store.accounts.find((a) => a.id === account.id);
+        if (acc) acc.status = 'rate_limited';
+      });
+      if (!res.headersSent) {
+        return res.status(429).json({ error: 'rate_limited', message: 'account rate limited' });
+      }
+      return;
+    }
+    if (!res.headersSent) {
+      return res.status(502).json({
+        error: 'web_request_failed',
+        message: err instanceof Error ? err.message : 'unknown_error'
+      });
+    }
   } finally {
     await withStoreLock(async (store) => {
       store.usageEvents.push({
-        accountId: null,
+        accountId,
         requestedModel,
         routedModel: requestedModel,
         stream,
