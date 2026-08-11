@@ -2,8 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const STORE_FILE = path.join(DATA_DIR, 'store.json');
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, '..', 'data');
+const STORE_FILE = process.env.STORE_FILE
+  ? path.resolve(process.env.STORE_FILE)
+  : path.join(DATA_DIR, 'store.json');
 let storeQueue = Promise.resolve();
 
 function ensureStore() {
