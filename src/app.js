@@ -112,9 +112,14 @@ function estimateTokens(text) {
 }
 
 function timingSafeStringEqual(a, b) {
-  const left = crypto.createHash('sha256').update(String(a || '')).digest();
-  const right = crypto.createHash('sha256').update(String(b || '')).digest();
-  return crypto.timingSafeEqual(left, right);
+  const leftRaw = Buffer.from(String(a || ''), 'utf8');
+  const rightRaw = Buffer.from(String(b || ''), 'utf8');
+  const len = Math.max(leftRaw.length, rightRaw.length, 1);
+  const left = Buffer.alloc(len);
+  const right = Buffer.alloc(len);
+  leftRaw.copy(left);
+  rightRaw.copy(right);
+  return crypto.timingSafeEqual(left, right) && leftRaw.length === rightRaw.length;
 }
 
 function estimateRequestTokens(messages, tools, thinking) {
