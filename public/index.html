@@ -48,6 +48,9 @@
     </div>
 
     <div id="dashboard">
+      <div style="text-align:right;margin-bottom:8px;">
+        <button id="logoutBtn" class="btn-sm btn-danger">退出登录</button>
+      </div>
       <div class="row">
         <div class="card">
           <h3>修改管理员密码</h3>
@@ -300,6 +303,16 @@
         } catch (e) {
           setMsg('accountMsg', `测活失败: ${e.message}`, true);
         }
+      };
+
+      document.getElementById('logoutBtn').onclick = async () => {
+        try {
+          await api('/api/admin/logout', 'POST');
+        } catch (_) { /* ignore */ }
+        csrfToken = null;
+        allAccounts = [];
+        document.getElementById('login').style.display = 'block';
+        document.getElementById('dashboard').style.display = 'none';
       };
 
       document.getElementById('changePassBtn').onclick = async () => {
