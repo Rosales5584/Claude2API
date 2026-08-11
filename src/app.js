@@ -155,13 +155,17 @@ function estimateRequestTokens(messages, tools, thinking) {
   return Math.max(1, Math.ceil(totalChars / 4));
 }
 
-function pickTool(tools, choiceType, choiceName) {
+function pickTool(tools, choiceType, choiceName, prompt) {
   if (!tools.length || choiceType === 'none') return null;
   if (choiceType === 'tool' && choiceName) {
     return tools.find((t) => t?.name === choiceName) || null;
   }
-  if (choiceType === 'any' || choiceType === 'auto') {
+  if (choiceType === 'any') {
     return tools[0];
+  }
+  if (choiceType === 'auto') {
+    const explicitToolIntent = /\buse[_ -]?tool\b|请调用工具|调用工具/.test(prompt || '');
+    return explicitToolIntent ? tools[0] : null;
   }
   return null;
 }
@@ -188,7 +192,8 @@ function writeSse(res, event, data) {
 }
 
 function buildLocalText(prompt, imageCount) {
-  const summary = prompt ? `你说的是：${prompt}` : '已收到消息。';
+  const safePrompt = (prompt || '').slice(0, 300);
+  const summary = safePrompt ? `你说的是：${safePrompt}` : '已收到消息。';
   const imageInfo = imageCount > 0 ? `（检测到 ${imageCount} 张图片输入）` : '';
   return `本地兼容模式回复。${summary}${imageInfo}`;
 }
@@ -278,6 +283,10 @@ app.use(express.urlencoded({ extended: false }));
 if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required in production');
 }
+if (!process.env.SESSION_SECRET) {
+  // eslint-disable-next-line no-console
+  console.warn('SESSION_SECRET is not set; falling back to insecure local default secret.');
+}
 if (!process.env.CLAUDE_API_KEY) {
   // eslint-disable-next-line no-console
   console.warn('CLAUDE_API_KEY is not set; /v1/messages is unauthenticated.');
@@ -309,7 +318,7 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
   const prompt = getLatestUserPrompt(messages);
   const imageCount = countInputImages(messages);
   const withThinking = thinkingEnabled(req.body, routedModel);
-  const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName);
+  const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName, prompt);
   const toolUse = selectedTool
     ? {
         id: `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
