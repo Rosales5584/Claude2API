@@ -580,6 +580,52 @@ app.get('/api/stats/accounts', authRequired, async (req, res) => {
   res.json({ items: computeAccountStats(store) });
 });
 
+// Account management
+app.get('/api/admin/accounts', authRequired, async (req, res) => {
+  const store = await readStore();
+  const items = store.accounts.map((a) => ({
+    id: a.id,
+    email: a.email,
+    status: a.status,
+    dailyLimit: a.dailyLimit || 0
+  }));
+  res.json({ items });
+});
+
+app.post('/api/admin/accounts', authRequired, csrfRequired, async (req, res) => {
+  const { email, sessionKey } = req.body || {};
+  if (!sessionKey || typeof sessionKey !== 'string' || !sessionKey.trim()) {
+    return res.status(400).json({ error: 'session_key_required' });
+  }
+  let newAccount;
+  await withStoreLock(async (store) => {
+    const id = `acc-${Date.now()}`;
+    newAccount = {
+      id,
+      email: (email || '').trim() || `${id}@local`,
+      sessionKey: sessionKey.trim(),
+      dailyLimit: Number(process.env.CLAUDE_DAILY_LIMIT || 0),
+      status: 'active'
+    };
+    store.accounts.push(newAccount);
+  });
+  return res.json({ ok: true, account: { id: newAccount.id, email: newAccount.email, status: newAccount.status } });
+});
+
+app.delete('/api/admin/accounts/:id', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let found = false;
+  await withStoreLock(async (store) => {
+    const before = store.accounts.length;
+    store.accounts = store.accounts.filter((a) => a.id !== id);
+    found = store.accounts.length < before;
+  });
+  if (!found) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true });
+});
+
 app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 app.get('/', (req, res) => res.redirect('/admin'));
 

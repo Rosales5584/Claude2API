@@ -57,6 +57,29 @@
           </div>
         </div>
       </div>
+
+      <div class="card">
+        <h3>账号管理（Cookie / Session Key）</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <input id="newEmail" placeholder="邮箱（可选，留空自动生成）" style="flex:1;min-width:180px;" />
+          <input id="newSessionKey" placeholder="Session Key（sk-ant-sid01-...）" style="flex:2;min-width:240px;" />
+          <button id="addAccountBtn">添加账号</button>
+        </div>
+        <div id="accountMsg" class="msg"></div>
+        <div style="overflow:auto;margin-top:10px;">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>邮箱</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <script>
