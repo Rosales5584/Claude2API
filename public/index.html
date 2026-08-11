@@ -5,35 +5,152 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Claude2API Admin</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
-      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-      input, textarea { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
-      textarea { resize: vertical; }
-      button { padding: 8px 12px; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: #f5f5f5; }
-      table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-      #dashboard { display: none; }
-      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-      .msg { margin-top: 8px; color: #0a7; min-height: 1.2em; }
-      .err { color: #c00; }
-      .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
-      .badge-active  { background: #d4edda; color: #155724; }
-      .badge-limited { background: #fff3cd; color: #856404; }
-      .badge-banned  { background: #f8d7da; color: #721c24; }
-      .btn-sm { padding: 4px 8px; font-size: 12px; margin: 0 2px; border-radius: 4px; }
-      .btn-danger { background: #f8d7da; border-color: #f5c6cb; color: #721c24; }
-      .btn-warn   { background: #fff3cd; border-color: #ffeeba; color: #856404; }
-      .btn-info   { background: #cce5ff; border-color: #b8daff; color: #004085; }
-      .filter-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-      .pill {
-        padding: 4px 14px; border-radius: 20px; font-size: 13px; cursor: pointer;
-        border: 2px solid transparent; background: #f0f0f0; color: #444;
-        user-select: none; transition: border-color .15s;
+      *, *::before, *::after { box-sizing: border-box; }
+
+      body {
+        font-family: 'Segoe UI', Arial, sans-serif;
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(135deg, #fef9c3 0%, #fde68a 50%, #fbbf24 100%);
+        color: #1c1917;
+        padding: 28px 16px 48px;
       }
-      .pill.active-pill  { border-color: #155724; background: #d4edda; color: #155724; }
-      .pill.limited-pill { border-color: #856404; background: #fff3cd; color: #856404; }
-      .pill.banned-pill  { border-color: #721c24; background: #f8d7da; color: #721c24; }
-      .pill.selected     { font-weight: bold; box-shadow: 0 0 0 2px rgba(0,0,0,.15); }
+
+      h1 {
+        text-align: center;
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #78350f;
+        margin: 0 0 28px;
+        letter-spacing: 0.5px;
+        text-shadow: 0 1px 2px rgba(255,255,255,.6);
+      }
+
+      h3 {
+        margin: 0 0 14px;
+        font-size: 1rem;
+        font-weight: 700;
+        color: #92400e;
+        border-left: 4px solid #f59e0b;
+        padding-left: 10px;
+      }
+
+      .card {
+        background: #fff;
+        border: none;
+        border-radius: 16px;
+        padding: 20px 22px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 18px rgba(180,120,0,.13), 0 1px 4px rgba(0,0,0,.06);
+        transition: box-shadow .2s;
+      }
+      .card:hover { box-shadow: 0 8px 28px rgba(180,120,0,.18), 0 2px 6px rgba(0,0,0,.08); }
+
+      input, textarea {
+        padding: 9px 12px;
+        margin: 5px 0;
+        width: 100%;
+        border: 1.5px solid #fcd34d;
+        border-radius: 8px;
+        font-size: 14px;
+        background: #fffbeb;
+        color: #1c1917;
+        outline: none;
+        transition: border-color .15s, box-shadow .15s;
+      }
+      input:focus, textarea:focus {
+        border-color: #f59e0b;
+        box-shadow: 0 0 0 3px rgba(245,158,11,.2);
+        background: #fff;
+      }
+      textarea { resize: vertical; }
+
+      button {
+        padding: 9px 16px;
+        cursor: pointer;
+        border-radius: 8px;
+        border: 1.5px solid #fbbf24;
+        background: linear-gradient(135deg, #fde68a, #fbbf24);
+        color: #78350f;
+        font-weight: 600;
+        font-size: 14px;
+        transition: filter .15s, box-shadow .15s;
+        white-space: nowrap;
+      }
+      button:hover { filter: brightness(1.06); box-shadow: 0 2px 8px rgba(245,158,11,.35); }
+      button:active { filter: brightness(.96); }
+
+      table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+      th {
+        background: #fef3c7;
+        color: #92400e;
+        font-weight: 700;
+        font-size: 13px;
+        padding: 10px 10px;
+        border-bottom: 2px solid #fde68a;
+        text-align: left;
+      }
+      td {
+        padding: 9px 10px;
+        border-bottom: 1px solid #fef3c7;
+        font-size: 14px;
+        vertical-align: middle;
+      }
+      tr:last-child td { border-bottom: none; }
+      tr:hover td { background: #fffbeb; }
+
+      #dashboard { display: none; }
+
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+      @media (max-width: 680px) { .row { grid-template-columns: 1fr; } }
+
+      .msg { margin-top: 8px; color: #059669; min-height: 1.2em; font-size: 13px; }
+      .err { color: #dc2626; }
+
+      .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 700; letter-spacing: .3px; }
+      .badge-active  { background: #d1fae5; color: #065f46; }
+      .badge-limited { background: #fef3c7; color: #92400e; }
+      .badge-banned  { background: #fee2e2; color: #991b1b; }
+
+      .btn-sm { padding: 4px 10px; font-size: 12px; margin: 0 2px; border-radius: 6px; font-weight: 600; }
+      .btn-danger { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+      .btn-danger:hover { background: #fecaca; }
+      .btn-warn   { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
+      .btn-warn:hover { background: #fde68a; }
+      .btn-info   { background: #dbeafe; border-color: #93c5fd; color: #1e40af; }
+      .btn-info:hover { background: #bfdbfe; }
+
+      .filter-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .pill {
+        padding: 5px 16px; border-radius: 20px; font-size: 13px; cursor: pointer;
+        border: 2px solid #fcd34d; background: #fef9c3; color: #78350f;
+        user-select: none; transition: border-color .15s, background .15s;
+        font-weight: 500;
+      }
+      .pill.active-pill  { border-color: #065f46; background: #d1fae5; color: #065f46; }
+      .pill.limited-pill { border-color: #92400e; background: #fef3c7; color: #92400e; }
+      .pill.banned-pill  { border-color: #991b1b; background: #fee2e2; color: #991b1b; }
+      .pill.selected     { font-weight: 700; box-shadow: 0 0 0 2px rgba(0,0,0,.12); }
+
+      details > summary { cursor: pointer; font-weight: 700; color: #92400e; padding: 4px 0; }
+      details > summary:hover { color: #78350f; }
+
+      code {
+        background: #fef3c7;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: #92400e;
+      }
+
+      .page-wrap { max-width: 960px; margin: 0 auto; }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+      }
     </style>
   </head>
   <body>
