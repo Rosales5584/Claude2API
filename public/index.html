@@ -171,9 +171,8 @@
       <div class="row">
         <div class="card">
           <h3>修改管理员密码</h3>
-          <input id="oldPassword" placeholder="旧密码" type="password" />
           <input id="newPassword" placeholder="新密码（至少8位）" type="password" />
-          <button id="changePassBtn">修改密码</button>
+          <button id="changePassBtn">更换密码</button>
           <div id="passMsg" class="msg"></div>
         </div>
 
@@ -442,10 +441,10 @@
       document.getElementById('changePassBtn').onclick = async () => {
         try {
           await api('/api/admin/password', 'POST', {
-            oldPassword: document.getElementById('oldPassword').value,
             newPassword: document.getElementById('newPassword').value
           });
           setMsg('passMsg', '密码修改成功');
+          document.getElementById('newPassword').value = '';
         } catch (e) {
           setMsg('passMsg', `修改失败: ${e.message}`, true);
         }

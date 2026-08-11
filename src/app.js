@@ -554,24 +554,15 @@ app.get('/api/admin/me', authRequired, (req, res) => {
 });
 
 app.post('/api/admin/password', authRequired, csrfRequired, async (req, res) => {
-  const { oldPassword, newPassword } = req.body || {};
+  const { newPassword } = req.body || {};
 
   if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ error: 'new_password_too_short' });
   }
 
-  let updated = false;
   await withStoreLock(async (lockedStore) => {
-    const oldOk = bcrypt.compareSync(oldPassword || '', lockedStore.adminPassHash);
-    if (!oldOk) {
-      return;
-    }
     lockedStore.adminPassHash = bcrypt.hashSync(newPassword, 10);
-    updated = true;
   });
-  if (!updated) {
-    return res.status(400).json({ error: 'old_password_invalid' });
-  }
   return res.json({ ok: true });
 });
 
