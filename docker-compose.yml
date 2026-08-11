@@ -1,6 +1,8 @@
 services:
   claude2api:
-    image: pushzx/claude2api:latest
+    build:
+      context: .
+    image: claude2api-local:latest
     container_name: claude2api
     restart: unless-stopped
     ports:

@@ -1,0 +1,22 @@
+{
+  "name": "claude2api",
+  "version": "1.0.0",
+  "description": "Claude.ai Web → Anthropic API 兼容代理。将 Claude.ai 账号会话转换为标准 `/v1/messages` 接口，支持流式输出、工具调用、图片上传、扩展思考等功能。",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://localhost:26831/Rosales5584/Claude2API"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0"
+  }
+}

@@ -26,6 +26,8 @@ nano .env   # 填入你的配置
 docker compose up -d
 ```
 
+> 当前仓库为二开可编辑版本，`docker-compose.yml` 默认从本仓库源码构建镜像。
+
 ### 4. 验证
 
 ```bash
@@ -246,6 +248,7 @@ curl http://localhost:8080/v1/messages \
 | `claude-opus-4-6` | claude-opus-4-6（需要 Pro）|
 | `*-thinking` 后缀 | 同模型 + 开启扩展思考 |
 | 自定义映射 | 在管理面板配置 |
+| 其他任意模型名 | 回退到 `claude-sonnet-5` |
 
 ---
 
@@ -258,6 +261,8 @@ curl http://localhost:8080/v1/messages \
 - 代理配置（支持 `{sid}` 占位符实现按账号固定 IP）
 - 模型名映射（自定义入参模型名 → Claude.ai 模型名）
 - 实时 metrics（请求数、延迟、成功率）
+- 管理员密码修改（控制台在线修改）
+- 账号会话使用率与近 7 天使用率展示
 - 全局限速配置
 - API Key 管理
 - 支持中文 / English 切换，深色 / 浅色主题
