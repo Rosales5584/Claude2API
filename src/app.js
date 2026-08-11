@@ -110,6 +110,51 @@ function estimateTokens(text) {
   return Math.max(1, Math.ceil(String(text).length / 4));
 }
 
+function timingSafeStringEqual(a, b) {
+  const left = crypto.createHash('sha256').update(String(a || '')).digest();
+  const right = crypto.createHash('sha256').update(String(b || '')).digest();
+  return crypto.timingSafeEqual(left, right);
+}
+
+function estimateRequestTokens(messages, tools, thinking) {
+  let totalChars = 0;
+  for (const msg of messages || []) {
+    totalChars += String(msg?.role || '').length;
+    const blocks = normalizeContent(msg?.content);
+    for (const block of blocks) {
+      if (typeof block?.text === 'string') {
+        totalChars += block.text.length;
+      }
+      if (typeof block?.thinking === 'string') {
+        totalChars += block.thinking.length;
+      }
+      if (typeof block?.name === 'string') {
+        totalChars += block.name.length;
+      }
+      if (block?.input && typeof block.input === 'object') {
+        totalChars += JSON.stringify(block.input).length;
+      }
+      if (block?.source && typeof block.source === 'object') {
+        const raw = block.source.data;
+        if (typeof raw === 'string') {
+          totalChars += raw.length;
+        }
+      }
+    }
+  }
+  for (const tool of tools || []) {
+    totalChars += String(tool?.name || '').length;
+    totalChars += String(tool?.description || '').length;
+    if (tool?.input_schema && typeof tool.input_schema === 'object') {
+      totalChars += JSON.stringify(tool.input_schema).length;
+    }
+  }
+  if (thinking) {
+    totalChars += JSON.stringify(thinking).length;
+  }
+  return Math.max(1, Math.ceil(totalChars / 4));
+}
+
 function pickTool(tools, choiceType, choiceName) {
   if (!tools.length || choiceType === 'none') return null;
   if (choiceType === 'tool' && choiceName) {
@@ -145,7 +190,7 @@ function writeSse(res, event, data) {
 function buildLocalText(prompt, imageCount) {
   const summary = prompt ? `你说的是：${prompt}` : '已收到消息。';
   const imageInfo = imageCount > 0 ? `（检测到 ${imageCount} 张图片输入）` : '';
-  return `Local compatibility mode response. ${summary}${imageInfo}`;
+  return `本地兼容模式回复。${summary}${imageInfo}`;
 }
 
 function pickAccount(store) {
@@ -189,7 +234,7 @@ function apiKeyRequired(req, res, next) {
 
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (token !== apiKey) {
+  if (!timingSafeStringEqual(token, apiKey)) {
     return res.status(401).json({ error: 'invalid_api_key' });
   }
   return next();
@@ -274,11 +319,7 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
     : null;
   const textReply = buildLocalText(prompt, imageCount);
   const thinkingReply = `分析中：本地兼容层已解析请求，模型路由为 ${routedModel}。`;
-  const inputTokens = estimateTokens(JSON.stringify({
-    messages,
-    tools,
-    thinking: req.body?.thinking || null
-  }));
+  const inputTokens = estimateRequestTokens(messages, tools, req.body?.thinking || null);
   const outputTokens = estimateTokens(
     toolUse ? JSON.stringify(toolUse.input) : `${withThinking ? thinkingReply : ''}${textReply}`
   );
