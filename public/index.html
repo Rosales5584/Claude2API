@@ -7,7 +7,8 @@
     <style>
       body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
       .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-      input { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
+      input, textarea { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
+      textarea { resize: vertical; }
       button { padding: 8px 12px; cursor: pointer; }
       table { width: 100%; border-collapse: collapse; margin-top: 12px; }
       th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
@@ -15,6 +16,14 @@
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
       .msg { margin-top: 8px; color: #0a7; }
       .err { color: #c00; }
+      .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+      .badge-active { background: #d4edda; color: #155724; }
+      .badge-limited { background: #fff3cd; color: #856404; }
+      .badge-banned  { background: #f8d7da; color: #721c24; }
+      .btn-sm { padding: 4px 8px; font-size: 12px; margin: 0 2px; }
+      .btn-danger { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+      .btn-warn   { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; }
+      .btn-info   { background: #cce5ff; border: 1px solid #b8daff; color: #004085; }
     </style>
   </head>
   <body>
@@ -60,17 +69,39 @@
 
       <div class="card">
         <h3>账号管理（Cookie / Session Key）</h3>
+
+        <!-- Single add -->
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
           <input id="newEmail" placeholder="邮箱（可选，留空自动生成）" style="flex:1;min-width:180px;" />
           <input id="newSessionKey" placeholder="Session Key（sk-ant-sid01-...）" style="flex:2;min-width:240px;" />
           <button id="addAccountBtn">添加账号</button>
         </div>
+
+        <!-- Bulk import -->
+        <details style="margin-bottom:8px;">
+          <summary style="cursor:pointer;font-weight:bold;">▶ 批量导入</summary>
+          <div style="margin-top:8px;">
+            <p style="margin:4px 0;font-size:13px;color:#555;">
+              每行一条，支持格式：<code>sessionKey</code>、<code>email:sessionKey</code>、<code>email sessionKey</code>
+            </p>
+            <textarea id="bulkText" rows="6" placeholder="sk-ant-sid01-aaa&#10;user@example.com:sk-ant-sid01-bbb&#10;user2@example.com sk-ant-sid01-ccc"></textarea>
+            <button id="bulkImportBtn" style="margin-top:4px;">批量导入</button>
+          </div>
+        </details>
+
+        <!-- Actions -->
+        <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="testAllBtn" class="btn-info">一键测活</button>
+          <span style="font-size:12px;color:#555;align-self:center;">检测所有非封禁账号的 Session Key 格式有效性，失效自动标记为封禁</span>
+        </div>
+
         <div id="accountMsg" class="msg"></div>
+
+        <!-- Account list -->
         <div style="overflow:auto;margin-top:10px;">
           <table>
             <thead>
               <tr>
-                <th>ID</th>
                 <th>邮箱</th>
                 <th>状态</th>
                 <th>操作</th>
@@ -128,6 +159,105 @@
         renderStats(data.items || []);
       }
 
+      function statusBadge(status) {
+        const map = { active: 'badge-active', limited: 'badge-limited', banned: 'badge-banned' };
+        const cls = map[status] || 'badge-limited';
+        return `<span class="badge ${cls}">${status}</span>`;
+      }
+
+      async function loadAccounts() {
+        try {
+          const data = await api('/api/admin/accounts');
+          const tbody = document.getElementById('accountsBody');
+          tbody.innerHTML = '';
+          (data.items || []).forEach((acc) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${acc.email}</td>
+              <td>${statusBadge(acc.status)}</td>
+              <td>
+                ${acc.status !== 'active' ? `<button class="btn-sm btn-warn" data-id="${acc.id}" data-action="unrate">恢复</button>` : ''}
+                <button class="btn-sm btn-danger" data-id="${acc.id}" data-action="delete">删除</button>
+              </td>
+            `;
+            tbody.appendChild(tr);
+          });
+        } catch (e) {
+          setMsg('accountMsg', `加载账号失败: ${e.message}`, true);
+        }
+      }
+
+      document.getElementById('accountsBody').addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-action]');
+        if (!btn) return;
+        const { id, action } = btn.dataset;
+        try {
+          if (action === 'delete') {
+            if (!confirm('确认删除该账号？')) return;
+            await api(`/api/admin/accounts/${id}`, 'DELETE');
+            setMsg('accountMsg', '账号已删除');
+          } else if (action === 'unrate') {
+            await api(`/api/admin/accounts/${id}/unrate`, 'POST');
+            setMsg('accountMsg', '账号已恢复为 active');
+          }
+          await loadAccounts();
+          await loadStats();
+        } catch (e) {
+          setMsg('accountMsg', `操作失败: ${e.message}`, true);
+        }
+      });
+
+      document.getElementById('addAccountBtn').onclick = async () => {
+        const email = document.getElementById('newEmail').value.trim();
+        const sessionKey = document.getElementById('newSessionKey').value.trim();
+        try {
+          await api('/api/admin/accounts', 'POST', { email, sessionKey });
+          setMsg('accountMsg', '账号添加成功');
+          document.getElementById('newEmail').value = '';
+          document.getElementById('newSessionKey').value = '';
+          await loadAccounts();
+          await loadStats();
+        } catch (e) {
+          setMsg('accountMsg', `添加失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('bulkImportBtn').onclick = async () => {
+        const text = document.getElementById('bulkText').value;
+        if (!text.trim()) {
+          setMsg('accountMsg', '请先填写要导入的内容', true);
+          return;
+        }
+        try {
+          const data = await api('/api/admin/accounts/bulk', 'POST', { text });
+          setMsg('accountMsg', `批量导入完成：成功 ${data.added} 条，跳过 ${data.skipped} 条（重复或格式错误）`);
+          document.getElementById('bulkText').value = '';
+          await loadAccounts();
+          await loadStats();
+        } catch (e) {
+          setMsg('accountMsg', `批量导入失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('testAllBtn').onclick = async () => {
+        setMsg('accountMsg', '测活中，请稍候…');
+        try {
+          const data = await api('/api/admin/accounts/test-all', 'POST');
+          const banned = (data.results || []).filter((r) => r.result === 'banned').length;
+          const ok = (data.results || []).filter((r) => r.result === 'ok').length;
+          setMsg('accountMsg', `测活完成：有效 ${ok} 个，已封禁 ${banned} 个`);
+          await loadAccounts();
+          await loadStats();
+        } catch (e) {
+          setMsg('accountMsg', `测活失败: ${e.message}`, true);
+        }
+      };
+
+      async function loadStats() {
+        const data = await api('/api/stats/accounts');
+        renderStats(data.items || []);
+      }
+
       async function checkLogin() {
         try {
           await api('/api/admin/me');
@@ -135,7 +265,7 @@
           csrfToken = csrf.token;
           document.getElementById('login').style.display = 'none';
           document.getElementById('dashboard').style.display = 'block';
-          await loadStats();
+          await Promise.all([loadStats(), loadAccounts()]);
         } catch (_) {
           document.getElementById('login').style.display = 'block';
           document.getElementById('dashboard').style.display = 'none';

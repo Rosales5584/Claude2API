@@ -626,6 +626,94 @@ app.delete('/api/admin/accounts/:id', authRequired, csrfRequired, async (req, re
   return res.json({ ok: true });
 });
 
+// Bulk import: each line is "sessionKey" or "email:sessionKey" or "email sessionKey"
+app.post('/api/admin/accounts/bulk', authRequired, csrfRequired, async (req, res) => {
+  const { text } = req.body || {};
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'text_required' });
+  }
+  const lines = text.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+  const added = [];
+  const skipped = [];
+  await withStoreLock(async (store) => {
+    for (const line of lines) {
+      // Support: "email sessionKey", "email:sessionKey", or just "sessionKey"
+      let email = '';
+      let sessionKey = '';
+      const spaceIdx = line.indexOf(' ');
+      const colonIdx = line.indexOf(':');
+      if (spaceIdx > 0 && !line.startsWith('sk-ant-')) {
+        email = line.slice(0, spaceIdx).trim();
+        sessionKey = line.slice(spaceIdx + 1).trim();
+      } else if (colonIdx > 0 && !line.startsWith('sk-ant-')) {
+        email = line.slice(0, colonIdx).trim();
+        sessionKey = line.slice(colonIdx + 1).trim();
+      } else {
+        sessionKey = line;
+      }
+      if (!sessionKey) {
+        skipped.push(line);
+        continue;
+      }
+      // Skip duplicates by sessionKey
+      if (store.accounts.some((a) => a.sessionKey === sessionKey)) {
+        skipped.push(line);
+        continue;
+      }
+      const id = `acc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const account = {
+        id,
+        email: email || `${id}@local`,
+        sessionKey,
+        dailyLimit: Number(process.env.CLAUDE_DAILY_LIMIT || 0),
+        status: 'active'
+      };
+      store.accounts.push(account);
+      added.push({ id: account.id, email: account.email });
+    }
+  });
+  return res.json({ ok: true, added: added.length, skipped: skipped.length });
+});
+
+// Test all accounts: verify sessionKey format; mark obviously invalid ones as banned
+app.post('/api/admin/accounts/test-all', authRequired, csrfRequired, async (req, res) => {
+  const results = [];
+  await withStoreLock(async (store) => {
+    for (const account of store.accounts) {
+      if (account.status === 'banned') {
+        results.push({ id: account.id, email: account.email, result: 'skipped_banned' });
+        continue;
+      }
+      // Basic format check: must start with sk-ant-
+      const valid = typeof account.sessionKey === 'string' && account.sessionKey.startsWith('sk-ant-');
+      if (!valid) {
+        account.status = 'banned';
+        results.push({ id: account.id, email: account.email, result: 'banned' });
+      } else {
+        results.push({ id: account.id, email: account.email, result: 'ok' });
+      }
+    }
+  });
+  return res.json({ ok: true, results });
+});
+
+// Restore rate-limited / banned account back to active
+app.post('/api/admin/accounts/:id/unrate', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let found = false;
+  await withStoreLock(async (store) => {
+    const account = store.accounts.find((a) => a.id === id);
+    if (account) {
+      account.status = 'active';
+      found = true;
+    }
+  });
+  if (!found) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true });
+});
+
 app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 app.get('/', (req, res) => res.redirect('/admin'));
 
