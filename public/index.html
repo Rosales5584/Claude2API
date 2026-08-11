@@ -306,11 +306,13 @@
       };
 
       document.getElementById('logoutBtn').onclick = async () => {
-        try {
-          await api('/api/admin/logout', 'POST');
-        } catch (_) { /* ignore */ }
+        try { await api('/api/admin/logout', 'POST'); } catch (_) { /* ignore */ }
         csrfToken = null;
         allAccounts = [];
+        currentFilter = 'all';
+        document.querySelectorAll('#filterPills .pill').forEach((p, i) => {
+          p.classList.toggle('selected', i === 0);
+        });
         document.getElementById('login').style.display = 'block';
         document.getElementById('dashboard').style.display = 'none';
       };

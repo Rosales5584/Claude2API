@@ -543,7 +543,7 @@ app.get('/api/admin/csrf', authRequired, (req, res) => {
   res.json({ token: ensureCsrfToken(req) });
 });
 
-app.post('/api/admin/logout', authRequired, csrfRequired, (req, res) => {
+app.post('/api/admin/logout', authRequired, (req, res) => {
   req.session.destroy(() => {
     res.json({ ok: true });
   });
