@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude2API Admin</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+      input { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
+      button { padding: 8px 12px; cursor: pointer; }
+      table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      #dashboard { display: none; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .msg { margin-top: 8px; color: #0a7; }
+      .err { color: #c00; }
+    </style>
+  </head>
+  <body>
+    <h1>Claude2API 管理控制台</h1>
+
+    <div id="login" class="card">
+      <h3>管理员登录</h3>
+      <input id="username" placeholder="用户名" value="admin" />
+      <input id="password" placeholder="密码" type="password" />
+      <button id="loginBtn">登录</button>
+      <div id="loginMsg" class="msg"></div>
+    </div>
+
+    <div id="dashboard">
+      <div class="row">
+        <div class="card">
+          <h3>修改管理员密码</h3>
+          <input id="oldPassword" placeholder="旧密码" type="password" />
+          <input id="newPassword" placeholder="新密码（至少8位）" type="password" />
+          <button id="changePassBtn">修改密码</button>
+          <div id="passMsg" class="msg"></div>
+        </div>
+
+        <div class="card">
+          <h3>账号会话使用率</h3>
+          <button id="refreshBtn">刷新</button>
+          <div style="overflow:auto; margin-top: 10px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>账号</th>
+                  <th>今日会话</th>
+                  <th>7天会话</th>
+                  <th>会话使用率</th>
+                  <th>7天使用率</th>
+                </tr>
+              </thead>
+              <tbody id="statsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let csrfToken = null;
+
+      async function api(path, method = 'GET', body) {
+        const headers = body ? { 'Content-Type': 'application/json' } : {};
+        if (csrfToken && method !== 'GET') {
+          headers['X-CSRF-Token'] = csrfToken;
+        }
+        const resp = await fetch(path, {
+          method,
+          headers: Object.keys(headers).length ? headers : undefined,
+          body: body ? JSON.stringify(body) : undefined,
+          credentials: 'include'
+        });
+        const json = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(json.error || 'request_failed');
+        return json;
+      }
+
+      function setMsg(id, text, isErr = false) {
+        const el = document.getElementById(id);
+        el.textContent = text;
+        el.className = isErr ? 'msg err' : 'msg';
+      }
+
+      function renderStats(items) {
+        const tbody = document.getElementById('statsBody');
+        tbody.innerHTML = '';
+        items.forEach((it) => {
+          const usage = it.dailyUsageRate == null ? '不限额' : `${it.dailyUsageRate}%`;
+          const usage7 = it.sevenDayUsageRate == null ? '不限额' : `${it.sevenDayUsageRate}%`;
+          const tr = document.createElement('tr');
+          [it.email, it.todaySessions, it.sevenDaySessions, usage, usage7].forEach((val) => {
+            const td = document.createElement('td');
+            td.textContent = String(val);
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+      }
+
+      async function loadStats() {
+        const data = await api('/api/stats/accounts');
+        renderStats(data.items || []);
+      }
+
+      async function checkLogin() {
+        try {
+          await api('/api/admin/me');
+          const csrf = await api('/api/admin/csrf');
+          csrfToken = csrf.token;
+          document.getElementById('login').style.display = 'none';
+          document.getElementById('dashboard').style.display = 'block';
+          await loadStats();
+        } catch (_) {
+          document.getElementById('login').style.display = 'block';
+          document.getElementById('dashboard').style.display = 'none';
+        }
+      }
+
+      document.getElementById('loginBtn').onclick = async () => {
+        try {
+          await api('/api/admin/login', 'POST', {
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value
+          });
+          setMsg('loginMsg', '登录成功');
+          await checkLogin();
+        } catch (e) {
+          setMsg('loginMsg', `登录失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('changePassBtn').onclick = async () => {
+        try {
+          await api('/api/admin/password', 'POST', {
+            oldPassword: document.getElementById('oldPassword').value,
+            newPassword: document.getElementById('newPassword').value
+          });
+          setMsg('passMsg', '密码修改成功');
+        } catch (e) {
+          setMsg('passMsg', `修改失败: ${e.message}`, true);
+        }
+      };
+
+      document.getElementById('refreshBtn').onclick = loadStats;
+
+      checkLogin();
+    </script>
+  </body>
+</html>
