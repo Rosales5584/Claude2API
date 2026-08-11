@@ -7,17 +7,8 @@ const { readStore, withStoreLock } = require('./store');
 
 const app = express();
 
-const KNOWN_MODELS = new Set([
-  'claude-sonnet-5',
-  'claude-sonnet-4-6',
-  'claude-sonnet-4-5',
-  'claude-haiku-4-5',
-  'claude-opus-4-6'
-]);
 const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-
-let rrIndex = 0;
 
 function toMillis(ts) {
   return new Date(ts).getTime();
@@ -27,19 +18,6 @@ function getTodayStart(now = new Date()) {
   const d = new Date(now);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
-}
-
-function resolveModel(requestModel) {
-  if (!requestModel || typeof requestModel !== 'string') {
-    return 'claude-sonnet-5';
-  }
-
-  const normalized = requestModel.trim();
-  if (KNOWN_MODELS.has(normalized)) {
-    return normalized;
-  }
-
-  return 'claude-sonnet-5';
 }
 
 function normalizeContent(content) {
@@ -53,36 +31,6 @@ function normalizeContent(content) {
     return [content];
   }
   return [];
-}
-
-function extractTextFromBlock(block) {
-  if (!block || typeof block !== 'object') return '';
-  if (block.type === 'text' && typeof block.text === 'string') {
-    return block.text;
-  }
-  if (block.type === 'tool_result') {
-    if (typeof block.content === 'string') {
-      return block.content;
-    }
-    if (Array.isArray(block.content)) {
-      return block.content
-        .map((part) => (typeof part?.text === 'string' ? part.text : ''))
-        .join('\n');
-    }
-  }
-  return '';
-}
-
-function getLatestUserPrompt(messages) {
-  if (!Array.isArray(messages)) return '';
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (msg?.role !== 'user') continue;
-    const blocks = normalizeContent(msg.content);
-    const text = blocks.map(extractTextFromBlock).filter(Boolean).join('\n').trim();
-    if (text) return text;
-  }
-  return '';
 }
 
 function countInputImages(messages) {
@@ -106,11 +54,6 @@ function thinkingEnabled(body, routedModel) {
   return typeof routedModel === 'string' && routedModel.endsWith('-thinking');
 }
 
-function estimateTokens(text) {
-  if (!text) return 0;
-  return Math.max(1, Math.ceil(String(text).length / 4));
-}
-
 function timingSafeStringEqual(a, b) {
   const leftRaw = Buffer.from(String(a || ''), 'utf8');
   const rightRaw = Buffer.from(String(b || ''), 'utf8');
@@ -120,139 +63,6 @@ function timingSafeStringEqual(a, b) {
   leftRaw.copy(left);
   rightRaw.copy(right);
   return crypto.timingSafeEqual(left, right) && leftRaw.length === rightRaw.length;
-}
-
-function estimateRequestTokens(messages, tools, thinking) {
-  let totalChars = 0;
-  for (const msg of messages || []) {
-    totalChars += String(msg?.role || '').length;
-    const blocks = normalizeContent(msg?.content);
-    for (const block of blocks) {
-      if (typeof block?.text === 'string') {
-        totalChars += block.text.length;
-      }
-      if (typeof block?.thinking === 'string') {
-        totalChars += block.thinking.length;
-      }
-      if (typeof block?.name === 'string') {
-        totalChars += block.name.length;
-      }
-      if (block?.input && typeof block.input === 'object') {
-        totalChars += JSON.stringify(block.input).length;
-      }
-      if (block?.source && typeof block.source === 'object') {
-        const raw = block.source.data;
-        if (typeof raw === 'string') {
-          totalChars += raw.length;
-        }
-      }
-    }
-  }
-  for (const tool of tools || []) {
-    totalChars += String(tool?.name || '').length;
-    totalChars += String(tool?.description || '').length;
-    if (tool?.input_schema && typeof tool.input_schema === 'object') {
-      totalChars += JSON.stringify(tool.input_schema).length;
-    }
-  }
-  if (thinking) {
-    totalChars += JSON.stringify(thinking).length;
-  }
-  return Math.max(1, Math.ceil(totalChars / 4));
-}
-
-function pickTool(tools, choiceType, choiceName, prompt) {
-  if (!tools.length || choiceType === 'none') return null;
-  if (choiceType === 'tool' && choiceName) {
-    return tools.find((t) => t?.name === choiceName) || null;
-  }
-  if (choiceType === 'any') {
-    return tools[0];
-  }
-  if (choiceType === 'auto') {
-    const explicitToolIntent = /\buse[_ -]?tool\b|请调用工具|调用工具/.test(prompt || '');
-    if (explicitToolIntent) {
-      return tools[0];
-    }
-    const weatherIntent = /天气|weather|气温|温度/i.test(prompt || '');
-    if (weatherIntent) {
-      return tools.find((tool) => /weather|天气/i.test(`${tool?.name || ''} ${tool?.description || ''}`)) || null;
-    }
-    return null;
-  }
-  return null;
-}
-
-function extractLikelyLocation(prompt) {
-  const text = String(prompt || '');
-  const cityMatch = text.match(/(北京|上海|广州|深圳|杭州|成都|重庆|天津|苏州|武汉|西安|南京|长沙|郑州|青岛|沈阳|大连|厦门|香港|澳门|台北)/);
-  if (cityMatch) {
-    return cityMatch[1];
-  }
-  const genericMatch = text.match(/(?:查(?:询)?(?:一下)?|帮我查(?:一下)?)([^，。,\s]{2,20})(?:今天|天气|气温|温度)/);
-  if (genericMatch) {
-    return genericMatch[1];
-  }
-  return '';
-}
-
-function buildToolInput(prompt, imageCount, tool) {
-  const query = (prompt || '').trim() || 'no_query';
-  const properties = tool?.input_schema?.properties || {};
-  if (properties && typeof properties === 'object') {
-    const input = {};
-    if ('location' in properties) {
-      input.location = extractLikelyLocation(query) || query.slice(0, 40);
-    }
-    if ('unit' in properties) {
-      input.unit = /fahrenheit|华氏/.test(query.toLowerCase()) ? 'fahrenheit' : 'celsius';
-    }
-    if (Object.keys(input).length > 0) {
-      return input;
-    }
-  }
-  return {
-    query: query.slice(0, 300),
-    image_count: imageCount
-  };
-}
-
-function buildToolText(tool, toolInput) {
-  if (!tool?.name) return '';
-  if (tool.name === 'get_weather' && toolInput?.location) {
-    return `好的，我来帮您查询${toolInput.location}的天气。`;
-  }
-  return '';
-}
-
-function chunkText(text, size = 32) {
-  const chunks = [];
-  for (let i = 0; i < text.length; i += size) {
-    chunks.push(text.slice(i, i + size));
-  }
-  return chunks;
-}
-
-function writeSse(res, event, data) {
-  res.write(`event: ${event}\n`);
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
-}
-
-function buildLocalText(prompt, imageCount) {
-  const safePrompt = (prompt || '').slice(0, 300);
-  const summary = safePrompt ? `You said: ${safePrompt}` : 'Message received.';
-  const imageInfo = imageCount > 0 ? ` (${imageCount} image input(s) detected)` : '';
-  return `Local compatibility response. ${summary}${imageInfo}`;
-}
-
-function pickAccount(store) {
-  const actives = store.accounts.filter((a) => a.status === 'active');
-  if (!actives.length) {
-    return null;
-  }
-  const account = actives[rrIndex % actives.length];
-  rrIndex += 1;
-  return account;
 }
 
 function authRequired(req, res, next) {

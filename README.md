@@ -1,6 +1,6 @@
 # Claude2API — 部署指南
 
-Claude.ai Web → Anthropic API 兼容代理。将 Claude.ai 账号会话转换为标准 `/v1/messages` 接口，支持流式输出、工具调用、图片上传、扩展思考等功能。
+Claude.ai Web → Anthropic API 兼容代理。将请求转发为标准 `/v1/messages` 上游调用，支持流式输出、工具调用、图片上传、扩展思考等能力的透传。
 
 > 本仓库当前为二开本地实现版本：默认使用本地 JSON 存储（`/app/data/store.json`），不再依赖内置 PostgreSQL/Redis 容器。
 
@@ -83,10 +83,11 @@ CLAUDE_SESSION_KEYS=sk-ant-sid01-xxx,sk-ant-sid01-yyy
 | `MAX_RETRIES` | `3` | 账号切换重试次数 |
 | `COOLDOWN_MINUTES` | `5` | 触发 429 后冷却时间（分钟）|
 | `CLAUDE_API_KEY` | — | 保护 `/v1/messages` 的 API Key（可选）|
-| `UPSTREAM_MESSAGES_URL` | — | 真实上游 Messages 接口地址；设置后 `/v1/messages` 将转发到该后端 |
+| `UPSTREAM_MESSAGES_URL` | — | 真实上游 Messages 接口地址；`/v1/messages` 必须配置该后端才能工作 |
 | `UPSTREAM_API_KEY` | — | 调用上游时使用的 API Key（留空则透传请求里的认证头）|
 | `UPSTREAM_AUTH_HEADER` | `x-api-key` | 调用上游时使用的认证头名，如 `x-api-key` 或 `authorization` |
 | `UPSTREAM_ANTHROPIC_VERSION` | — | 调用 Anthropic 官方接口时附带的 `anthropic-version` |
+| `UPSTREAM_TIMEOUT_MS` | `120000` | 上游请求超时时间（毫秒） |
 
 ---
 
@@ -154,7 +155,7 @@ curl http://localhost:8080/v1/messages \
 
 ### 接到真实后端
 
-如果你希望当前服务像原版那样返回真实模型结果，而不是本地兼容层示例响应，需要配置上游：
+当前 `/v1/messages` 只做真实上游代理，不再返回任何本地模拟响应，因此必须配置上游：
 
 ```env
 UPSTREAM_MESSAGES_URL=https://api.anthropic.com/v1/messages
@@ -163,14 +164,14 @@ UPSTREAM_AUTH_HEADER=x-api-key
 UPSTREAM_ANTHROPIC_VERSION=2023-06-01
 ```
 
-配置后，`/v1/messages` 会把请求原样转发到真实后端，并保留流式响应。
+配置后，`/v1/messages` 会把客户端请求体原样转发到真实后端，并把上游响应体/错误体原样返回给客户端。
 
-### `/v1/messages` 兼容能力
+### `/v1/messages` 代理能力
 
-- 支持 `stream: true`（SSE，`message_start` / `content_block_*` / `message_delta` / `message_stop`）
-- 支持 `tools` + `tool_choice` 入参与 `tool_use` 输出
-- 支持图片块（`image` / `input_image`）解析
-- 支持扩展思考开关（`thinking: true` 或 `thinking.type=enabled`）
+- 支持 `stream: true`，保留上游 SSE 响应
+- 支持 `tools`、`tool_choice`、`system`、图片块、扩展思考等字段原样透传
+- 上游返回普通文本或 `tool_use` / Function Calling 结构时均原样返回
+- 上游失败时返回真实 HTTP 状态码与错误体，不降级为本地伪造内容
 
 流式示例：
 
@@ -185,17 +186,9 @@ curl http://localhost:8080/v1/messages \
   }'
 ```
 
-### 支持的模型名
+### 模型字段
 
-| 请求模型名（示例） | 实际路由 |
-|---|---|
-| `claude-sonnet-4-6` | claude-sonnet-4-6 |
-| `claude-sonnet-4-5` | claude-sonnet-4-5-20250929 |
-| `claude-haiku-4-5` | claude-haiku-4-5-20251001 |
-| `claude-opus-4-6` | claude-opus-4-6（需要 Pro）|
-| `*-thinking` 后缀 | 同模型 + 开启扩展思考 |
-| 自定义映射 | 在管理面板配置 |
-| 其他任意模型名 | 回退到 `claude-sonnet-5` |
+`model` 字段不会在本地被改写，客户端传什么就转发什么，由上游决定是否接受。
 
 ---
 
