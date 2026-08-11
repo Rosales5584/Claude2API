@@ -685,6 +685,31 @@ app.post('/api/admin/accounts/test-all', authRequired, csrfRequired, async (req,
   return res.json({ ok: true, results });
 });
 
+// Test a single account: verify sessionKey format; mark obviously invalid ones as banned
+app.post('/api/admin/accounts/:id/test', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let result = null;
+  await withStoreLock(async (store) => {
+    const account = store.accounts.find((a) => a.id === id);
+    if (!account) return;
+    if (account.status === 'banned') {
+      result = { id: account.id, email: account.email, result: 'skipped_banned' };
+      return;
+    }
+    const valid = typeof account.sessionKey === 'string' && account.sessionKey.startsWith('sk-ant-');
+    if (!valid) {
+      account.status = 'banned';
+      result = { id: account.id, email: account.email, result: 'banned' };
+    } else {
+      result = { id: account.id, email: account.email, result: 'ok' };
+    }
+  });
+  if (!result) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true, ...result });
+});
+
 // Restore rate-limited / banned account back to active
 app.post('/api/admin/accounts/:id/unrate', authRequired, csrfRequired, async (req, res) => {
   const { id } = req.params;

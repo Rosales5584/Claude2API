@@ -213,6 +213,7 @@
             <td>${acc.email}</td>
             <td>${statusBadge(acc.status)}</td>
             <td>
+              <button class="btn-sm btn-info" data-id="${acc.id}" data-action="test">刷新</button>
               ${acc.status !== 'active' ? `<button class="btn-sm btn-warn" data-id="${acc.id}" data-action="unrate">恢复</button>` : ''}
               <button class="btn-sm btn-danger" data-id="${acc.id}" data-action="delete">删除</button>
             </td>
@@ -255,6 +256,10 @@
           } else if (action === 'unrate') {
             await api(`/api/admin/accounts/${id}/unrate`, 'POST');
             setMsg('accountMsg', '账号已恢复为 active');
+          } else if (action === 'test') {
+            const data = await api(`/api/admin/accounts/${id}/test`, 'POST');
+            const label = data.result === 'ok' ? '有效' : data.result === 'banned' ? '已封禁' : '已跳过（封禁）';
+            setMsg('accountMsg', `账号 ${data.email} 检测结果：${label}`);
           }
           await Promise.all([loadAccounts(), loadStats()]);
         } catch (e) {
