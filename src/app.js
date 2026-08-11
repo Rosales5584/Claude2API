@@ -612,19 +612,7 @@ app.post('/api/admin/accounts', authRequired, csrfRequired, async (req, res) => 
   return res.json({ ok: true, account: { id: newAccount.id, email: newAccount.email, status: newAccount.status } });
 });
 
-app.delete('/api/admin/accounts/:id', authRequired, csrfRequired, async (req, res) => {
-  const { id } = req.params;
-  let found = false;
-  await withStoreLock(async (store) => {
-    const before = store.accounts.length;
-    store.accounts = store.accounts.filter((a) => a.id !== id);
-    found = store.accounts.length < before;
-  });
-  if (!found) {
-    return res.status(404).json({ error: 'account_not_found' });
-  }
-  return res.json({ ok: true });
-});
+// NOTE: /bulk, /test-all must be registered BEFORE /:id to avoid Express matching them as an id param.
 
 // Bulk import: each line is "sessionKey" or "email:sessionKey" or "email sessionKey"
 app.post('/api/admin/accounts/bulk', authRequired, csrfRequired, async (req, res) => {
@@ -707,6 +695,20 @@ app.post('/api/admin/accounts/:id/unrate', authRequired, csrfRequired, async (re
       account.status = 'active';
       found = true;
     }
+  });
+  if (!found) {
+    return res.status(404).json({ error: 'account_not_found' });
+  }
+  return res.json({ ok: true });
+});
+
+app.delete('/api/admin/accounts/:id', authRequired, csrfRequired, async (req, res) => {
+  const { id } = req.params;
+  let found = false;
+  await withStoreLock(async (store) => {
+    const before = store.accounts.length;
+    store.accounts = store.accounts.filter((a) => a.id !== id);
+    found = store.accounts.length < before;
   });
   if (!found) {
     return res.status(404).json({ error: 'account_not_found' });

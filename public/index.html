@@ -9,21 +9,31 @@
       .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
       input, textarea { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
       textarea { resize: vertical; }
-      button { padding: 8px 12px; cursor: pointer; }
+      button { padding: 8px 12px; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: #f5f5f5; }
       table { width: 100%; border-collapse: collapse; margin-top: 12px; }
       th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
       #dashboard { display: none; }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-      .msg { margin-top: 8px; color: #0a7; }
+      .msg { margin-top: 8px; color: #0a7; min-height: 1.2em; }
       .err { color: #c00; }
-      .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
-      .badge-active { background: #d4edda; color: #155724; }
+      .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+      .badge-active  { background: #d4edda; color: #155724; }
       .badge-limited { background: #fff3cd; color: #856404; }
       .badge-banned  { background: #f8d7da; color: #721c24; }
-      .btn-sm { padding: 4px 8px; font-size: 12px; margin: 0 2px; }
-      .btn-danger { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
-      .btn-warn   { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; }
-      .btn-info   { background: #cce5ff; border: 1px solid #b8daff; color: #004085; }
+      .btn-sm { padding: 4px 8px; font-size: 12px; margin: 0 2px; border-radius: 4px; }
+      .btn-danger { background: #f8d7da; border-color: #f5c6cb; color: #721c24; }
+      .btn-warn   { background: #fff3cd; border-color: #ffeeba; color: #856404; }
+      .btn-info   { background: #cce5ff; border-color: #b8daff; color: #004085; }
+      .filter-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+      .pill {
+        padding: 4px 14px; border-radius: 20px; font-size: 13px; cursor: pointer;
+        border: 2px solid transparent; background: #f0f0f0; color: #444;
+        user-select: none; transition: border-color .15s;
+      }
+      .pill.active-pill  { border-color: #155724; background: #d4edda; color: #155724; }
+      .pill.limited-pill { border-color: #856404; background: #fff3cd; color: #856404; }
+      .pill.banned-pill  { border-color: #721c24; background: #f8d7da; color: #721c24; }
+      .pill.selected     { font-weight: bold; box-shadow: 0 0 0 2px rgba(0,0,0,.15); }
     </style>
   </head>
   <body>
@@ -89,16 +99,24 @@
           </div>
         </details>
 
-        <!-- Actions -->
-        <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;">
+        <!-- Top actions -->
+        <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <button id="testAllBtn" class="btn-info">一键测活</button>
-          <span style="font-size:12px;color:#555;align-self:center;">检测所有非封禁账号的 Session Key 格式有效性，失效自动标记为封禁</span>
+          <span style="font-size:12px;color:#555;">检测所有非封禁账号的 Session Key 格式有效性，失效自动标记为封禁</span>
         </div>
 
         <div id="accountMsg" class="msg"></div>
 
+        <!-- Status filter pills -->
+        <div class="filter-pills" id="filterPills">
+          <span class="pill selected" data-filter="all">全部 <span id="cnt-all">0</span></span>
+          <span class="pill active-pill" data-filter="active">活跃 <span id="cnt-active">0</span></span>
+          <span class="pill limited-pill" data-filter="limited">冷却 <span id="cnt-limited">0</span></span>
+          <span class="pill banned-pill" data-filter="banned">封禁 <span id="cnt-banned">0</span></span>
+        </div>
+
         <!-- Account list -->
-        <div style="overflow:auto;margin-top:10px;">
+        <div style="overflow:auto;margin-top:4px;">
           <table>
             <thead>
               <tr>
@@ -115,6 +133,8 @@
 
     <script>
       let csrfToken = null;
+      let allAccounts = [];
+      let currentFilter = 'all';
 
       async function api(path, method = 'GET', body) {
         const headers = body ? { 'Content-Type': 'application/json' } : {};
@@ -165,28 +185,61 @@
         return `<span class="badge ${cls}">${status}</span>`;
       }
 
+      function updateCounts() {
+        const counts = { all: allAccounts.length, active: 0, limited: 0, banned: 0 };
+        allAccounts.forEach((a) => {
+          if (counts[a.status] !== undefined) counts[a.status] += 1;
+          else counts.limited += 1; // unknown statuses shown under limited
+        });
+        document.getElementById('cnt-all').textContent = counts.all;
+        document.getElementById('cnt-active').textContent = counts.active;
+        document.getElementById('cnt-limited').textContent = counts.limited;
+        document.getElementById('cnt-banned').textContent = counts.banned;
+      }
+
+      function renderAccountRows() {
+        const filtered = currentFilter === 'all'
+          ? allAccounts
+          : allAccounts.filter((a) => a.status === currentFilter);
+
+        const tbody = document.getElementById('accountsBody');
+        tbody.innerHTML = '';
+        filtered.forEach((acc) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${acc.email}</td>
+            <td>${statusBadge(acc.status)}</td>
+            <td>
+              ${acc.status !== 'active' ? `<button class="btn-sm btn-warn" data-id="${acc.id}" data-action="unrate">恢复</button>` : ''}
+              <button class="btn-sm btn-danger" data-id="${acc.id}" data-action="delete">删除</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+
       async function loadAccounts() {
         try {
           const data = await api('/api/admin/accounts');
-          const tbody = document.getElementById('accountsBody');
-          tbody.innerHTML = '';
-          (data.items || []).forEach((acc) => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-              <td>${acc.email}</td>
-              <td>${statusBadge(acc.status)}</td>
-              <td>
-                ${acc.status !== 'active' ? `<button class="btn-sm btn-warn" data-id="${acc.id}" data-action="unrate">恢复</button>` : ''}
-                <button class="btn-sm btn-danger" data-id="${acc.id}" data-action="delete">删除</button>
-              </td>
-            `;
-            tbody.appendChild(tr);
-          });
+          allAccounts = data.items || [];
+          updateCounts();
+          renderAccountRows();
         } catch (e) {
           setMsg('accountMsg', `加载账号失败: ${e.message}`, true);
         }
       }
 
+      // Filter pills
+      document.getElementById('filterPills').addEventListener('click', (e) => {
+        const pill = e.target.closest('[data-filter]');
+        if (!pill) return;
+        currentFilter = pill.dataset.filter;
+        document.querySelectorAll('#filterPills .pill').forEach((p) => p.classList.remove('selected'));
+        pill.classList.add('selected');
+        renderAccountRows();
+      });
+
+      // Account table actions
       document.getElementById('accountsBody').addEventListener('click', async (e) => {
         const btn = e.target.closest('button[data-action]');
         if (!btn) return;
@@ -200,8 +253,7 @@
             await api(`/api/admin/accounts/${id}/unrate`, 'POST');
             setMsg('accountMsg', '账号已恢复为 active');
           }
-          await loadAccounts();
-          await loadStats();
+          await Promise.all([loadAccounts(), loadStats()]);
         } catch (e) {
           setMsg('accountMsg', `操作失败: ${e.message}`, true);
         }
@@ -215,8 +267,7 @@
           setMsg('accountMsg', '账号添加成功');
           document.getElementById('newEmail').value = '';
           document.getElementById('newSessionKey').value = '';
-          await loadAccounts();
-          await loadStats();
+          await Promise.all([loadAccounts(), loadStats()]);
         } catch (e) {
           setMsg('accountMsg', `添加失败: ${e.message}`, true);
         }
@@ -232,8 +283,7 @@
           const data = await api('/api/admin/accounts/bulk', 'POST', { text });
           setMsg('accountMsg', `批量导入完成：成功 ${data.added} 条，跳过 ${data.skipped} 条（重复或格式错误）`);
           document.getElementById('bulkText').value = '';
-          await loadAccounts();
-          await loadStats();
+          await Promise.all([loadAccounts(), loadStats()]);
         } catch (e) {
           setMsg('accountMsg', `批量导入失败: ${e.message}`, true);
         }
@@ -246,42 +296,9 @@
           const banned = (data.results || []).filter((r) => r.result === 'banned').length;
           const ok = (data.results || []).filter((r) => r.result === 'ok').length;
           setMsg('accountMsg', `测活完成：有效 ${ok} 个，已封禁 ${banned} 个`);
-          await loadAccounts();
-          await loadStats();
+          await Promise.all([loadAccounts(), loadStats()]);
         } catch (e) {
           setMsg('accountMsg', `测活失败: ${e.message}`, true);
-        }
-      };
-
-      async function loadStats() {
-        const data = await api('/api/stats/accounts');
-        renderStats(data.items || []);
-      }
-
-      async function checkLogin() {
-        try {
-          await api('/api/admin/me');
-          const csrf = await api('/api/admin/csrf');
-          csrfToken = csrf.token;
-          document.getElementById('login').style.display = 'none';
-          document.getElementById('dashboard').style.display = 'block';
-          await Promise.all([loadStats(), loadAccounts()]);
-        } catch (_) {
-          document.getElementById('login').style.display = 'block';
-          document.getElementById('dashboard').style.display = 'none';
-        }
-      }
-
-      document.getElementById('loginBtn').onclick = async () => {
-        try {
-          await api('/api/admin/login', 'POST', {
-            username: document.getElementById('username').value,
-            password: document.getElementById('password').value
-          });
-          setMsg('loginMsg', '登录成功');
-          await checkLogin();
-        } catch (e) {
-          setMsg('loginMsg', `登录失败: ${e.message}`, true);
         }
       };
 
@@ -298,6 +315,33 @@
       };
 
       document.getElementById('refreshBtn').onclick = loadStats;
+
+      document.getElementById('loginBtn').onclick = async () => {
+        try {
+          await api('/api/admin/login', 'POST', {
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value
+          });
+          setMsg('loginMsg', '登录成功');
+          await checkLogin();
+        } catch (e) {
+          setMsg('loginMsg', `登录失败: ${e.message}`, true);
+        }
+      };
+
+      async function checkLogin() {
+        try {
+          await api('/api/admin/me');
+          const csrf = await api('/api/admin/csrf');
+          csrfToken = csrf.token;
+          document.getElementById('login').style.display = 'none';
+          document.getElementById('dashboard').style.display = 'block';
+          await Promise.all([loadStats(), loadAccounts()]);
+        } catch (_) {
+          document.getElementById('login').style.display = 'block';
+          document.getElementById('dashboard').style.display = 'none';
+        }
+      }
 
       checkLogin();
     </script>
