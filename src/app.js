@@ -15,6 +15,7 @@ const KNOWN_MODELS = new Set([
   'claude-opus-4-6'
 ]);
 const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 let rrIndex = 0;
 
@@ -164,6 +165,8 @@ function pickTool(tools, choiceType, choiceName, prompt) {
     return tools[0];
   }
   if (choiceType === 'auto') {
+    // Local stub cannot truly "decide like a model", so only trigger tool use
+    // when users provide an explicit tool-intent phrase.
     const explicitToolIntent = /\buse[_ -]?tool\b|请调用工具|调用工具/.test(prompt || '');
     return explicitToolIntent ? tools[0] : null;
   }
@@ -193,9 +196,9 @@ function writeSse(res, event, data) {
 
 function buildLocalText(prompt, imageCount) {
   const safePrompt = (prompt || '').slice(0, 300);
-  const summary = safePrompt ? `你说的是：${safePrompt}` : '已收到消息。';
-  const imageInfo = imageCount > 0 ? `（检测到 ${imageCount} 张图片输入）` : '';
-  return `本地兼容模式回复。${summary}${imageInfo}`;
+  const summary = safePrompt ? `You said: ${safePrompt}` : 'Message received.';
+  const imageInfo = imageCount > 0 ? ` (${imageCount} image input(s) detected)` : '';
+  return `Local compatibility response. ${summary}${imageInfo}`;
 }
 
 function pickAccount(store) {
@@ -285,14 +288,14 @@ if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
 }
 if (!process.env.SESSION_SECRET) {
   // eslint-disable-next-line no-console
-  console.warn('SESSION_SECRET is not set; falling back to insecure local default secret.');
+  console.warn('SESSION_SECRET is not set; using an ephemeral random secret for this process.');
 }
 if (!process.env.CLAUDE_API_KEY) {
   // eslint-disable-next-line no-console
   console.warn('CLAUDE_API_KEY is not set; /v1/messages is unauthenticated.');
 }
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'local-dev-secret-change-me',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
