@@ -144,6 +144,26 @@ curl http://localhost:8080/v1/messages \
 
 未设置 `CLAUDE_API_KEY` 时，`Authorization` 头可省略。
 
+### `/v1/messages` 兼容能力
+
+- 支持 `stream: true`（SSE，`message_start` / `content_block_*` / `message_delta` / `message_stop`）
+- 支持 `tools` + `tool_choice` 入参与 `tool_use` 输出
+- 支持图片块（`image` / `input_image`）解析
+- 支持扩展思考开关（`thinking: true` 或 `thinking.type=enabled`）
+
+流式示例：
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "stream": true,
+    "messages": [{"role":"user","content":"请调用工具查询天气"}],
+    "tools": [{"name":"weather_lookup","description":"查询天气","input_schema":{"type":"object"}}]
+  }'
+```
+
 ### 支持的模型名
 
 | 请求模型名（示例） | 实际路由 |

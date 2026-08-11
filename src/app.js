@@ -14,6 +14,7 @@ const KNOWN_MODELS = new Set([
   'claude-haiku-4-5',
   'claude-opus-4-6'
 ]);
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10);
 
 let rrIndex = 0;
 
@@ -109,16 +110,12 @@ function estimateTokens(text) {
   return Math.max(1, Math.ceil(String(text).length / 4));
 }
 
-function pickTool(tools, choiceType, choiceName, prompt) {
+function pickTool(tools, choiceType, choiceName) {
   if (!tools.length || choiceType === 'none') return null;
   if (choiceType === 'tool' && choiceName) {
     return tools.find((t) => t?.name === choiceName) || null;
   }
-  if (choiceType === 'any') {
-    return tools[0];
-  }
-  const wantsTool = /工具|tool|weather|search|查询|调用/.test(prompt || '');
-  if (wantsTool) {
+  if (choiceType === 'any' || choiceType === 'auto') {
     return tools[0];
   }
   return null;
@@ -267,7 +264,7 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
   const prompt = getLatestUserPrompt(messages);
   const imageCount = countInputImages(messages);
   const withThinking = thinkingEnabled(req.body, routedModel);
-  const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName, prompt);
+  const selectedTool = pickTool(tools, toolChoiceType, toolChoiceName);
   const toolUse = selectedTool
     ? {
         id: `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -471,8 +468,7 @@ app.post('/v1/messages', apiKeyRequired, async (req, res) => {
 app.post('/api/admin/login', async (req, res) => {
   const { username, password } = req.body || {};
   const store = await readStore();
-  const dummyHash = '$2b$10$8vWj5N5Y6Q4f4VVRx8JYtODQx95Ds2N7N5tbJvMNCc2N6fMCRkgxK';
-  const hash = username === store.adminUser ? store.adminPassHash : dummyHash;
+  const hash = username === store.adminUser ? store.adminPassHash : DUMMY_HASH;
   const ok = bcrypt.compareSync(password || '', hash);
 
   if (username !== store.adminUser || !ok) {
