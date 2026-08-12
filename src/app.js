@@ -361,7 +361,7 @@ async function proxyToClaudeWeb(req, res, account) {
     prompt,
     attachments: [],
     files: [],
-    model: { type: 'slug', value: requestedModel },
+    model: requestedModel,
     rendering_mode: 'rich',
     timezone: 'UTC'
   };
