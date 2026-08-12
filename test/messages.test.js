@@ -13,6 +13,7 @@ const ENV_KEYS = [
   'UPSTREAM_API_KEY',
   'UPSTREAM_AUTH_HEADER',
   'UPSTREAM_ANTHROPIC_VERSION',
+  'CLAUDE_WEB_BASE',
   'STORE_FILE',
   'DATA_DIR',
   'PORT'
@@ -36,6 +37,12 @@ function loadApp() {
 function createTempStoreFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude2api-test-'));
   return path.join(dir, 'store.json');
+}
+
+function createTempEnvDir(content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude2api-env-'));
+  fs.writeFileSync(path.join(dir, '.env'), content, 'utf8');
+  return dir;
 }
 
 async function listen(server) {
@@ -255,6 +262,74 @@ test('returns 503 when no active accounts are configured', async () => {
   }
 });
 
+test('loads upstream proxy config from .env when process env is unset', async () => {
+  const captured = {};
+  const upstream = http.createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      captured.headers = req.headers;
+      captured.body = JSON.parse(body);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        id: 'chatcompl_env',
+        type: 'message',
+        role: 'assistant',
+        model: captured.body.model,
+        content: [{ type: 'text', text: 'env backend ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 9, output_tokens: 3 }
+      }));
+    });
+  });
+  const upstreamPort = await listen(upstream);
+
+  const storeFile = createTempStoreFile();
+  const envDir = createTempEnvDir([
+    'SESSION_SECRET=test-secret',
+    'CLAUDE_API_KEY=local-key',
+    `UPSTREAM_MESSAGES_URL=http://127.0.0.1:${upstreamPort}/v1/messages`,
+    'UPSTREAM_API_KEY=upstream-key',
+    'UPSTREAM_AUTH_HEADER=x-api-key'
+  ].join('\n'));
+
+  resetEnv({ STORE_FILE: storeFile });
+  const previousCwd = process.cwd();
+  process.chdir(envDir);
+
+  const { startServer } = loadApp();
+  const appServer = startServer(0);
+  await new Promise((resolve) => appServer.once('listening', resolve));
+  const appPort = appServer.address().port;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${appPort}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'local-key'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: '你好' }]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.content[0].text, 'env backend ok');
+    assert.equal(captured.headers['x-api-key'], 'upstream-key');
+  } finally {
+    process.chdir(previousCwd);
+    await close(appServer);
+    await close(upstream);
+  }
+});
+
 test('passes through upstream error status and json body', async () => {
   const upstream = http.createServer((req, res) => {
     res.statusCode = 403;
@@ -387,6 +462,75 @@ test('routes /v1/messages through account pool session key to claude web api', a
       assert.equal(store.usageEvents[0].success, true);
     });
   } finally {
+    await close(appServer);
+    await close(claudeWeb);
+  }
+});
+
+test('loads session keys from .env and avoids no_active_account', async () => {
+  const orgUuid = 'org-env-uuid';
+  const captured = {};
+
+  const claudeWeb = http.createServer((req, res) => {
+    if (req.url === '/api/organizations') {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([{ uuid: orgUuid, name: 'Env Org' }]));
+      return;
+    }
+    if (req.url === `/api/organizations/${orgUuid}/chat_conversations`) {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ uuid: 'conv-env' }));
+      return;
+    }
+    if (req.url.endsWith('/completion')) {
+      captured.cookie = req.headers.cookie;
+      res.setHeader('content-type', 'text/event-stream');
+      res.write('data: ' + JSON.stringify({ completion: 'env web ok', stop_reason: 'stop_sequence' }) + '\n\n');
+      res.end();
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  const claudePort = await listen(claudeWeb);
+
+  const storeFile = createTempStoreFile();
+  const envDir = createTempEnvDir([
+    'SESSION_SECRET=test-secret',
+    'CLAUDE_API_KEY=local-key',
+    'CLAUDE_SESSION_KEYS=sk-ant-sid01-envtest',
+    `CLAUDE_WEB_BASE=http://127.0.0.1:${claudePort}`
+  ].join('\n'));
+
+  resetEnv({ STORE_FILE: storeFile });
+  const previousCwd = process.cwd();
+  process.chdir(envDir);
+
+  const { startServer } = loadApp();
+  const appServer = startServer(0);
+  await new Promise((resolve) => appServer.once('listening', resolve));
+  const appPort = appServer.address().port;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${appPort}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'local-key'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: '你好' }]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.content[0].text, 'env web ok');
+    assert.ok(captured.cookie && captured.cookie.includes('sk-ant-sid01-envtest'));
+  } finally {
+    process.chdir(previousCwd);
     await close(appServer);
     await close(claudeWeb);
   }

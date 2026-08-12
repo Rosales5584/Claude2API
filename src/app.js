@@ -3,6 +3,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const path = require('path');
+require('./load-env')();
 const { readStore, withStoreLock } = require('./store');
 
 const app = express();
