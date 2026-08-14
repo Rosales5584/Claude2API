@@ -11,8 +11,8 @@ Claude.ai Web → Anthropic API 兼容代理。将请求转发为标准 `/v1/mes
 ### 1. 克隆此仓库
 
 ```bash
-git clone https://github.com/realnoob007/claude2api-deploy.git
-cd claude2api-deploy
+git clone https://github.com/Rosales5584/Claude2API.git
+cd Claude2API
 ```
 
 ### 2. 配置环境变量
